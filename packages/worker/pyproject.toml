@@ -17,6 +17,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+# Training needs a CUDA machine; see docs/m2-gpu-training.md. gsplat builds CUDA kernels on
+# install, so torch has to be present first - install torch, then this extra.
+train = ["torch>=2.2", "gsplat>=1.4"]
+# Niantic's .spz encoder (MIT). Not on PyPI, so it is not listed as a dependency:
+#   pip install "git+https://github.com/nianticlabs/spz"
 
 [project.scripts]
 re3draw-worker = "re3draw_worker.cli:main"

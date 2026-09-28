@@ -1,13 +1,19 @@
-"""COLMAP text-model export (cameras.txt / images.txt / points3D.txt) + poses.json summary."""
+"""COLMAP text model (cameras.txt / images.txt / points3D.txt) + poses.json summary.
+
+`write_colmap` is the end of the pose stage; `read_colmap` is the start of the training stage.
+The text model is the hand-off format between them, so it is also what a user can swap out for
+a model from somewhere else.
+"""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from .pose import PoseResult
+from .pose import Camera, PoseResult
 
 # OpenCV puts the centre of the top-left pixel at (0, 0); COLMAP puts it at (0.5, 0.5).
 _COLMAP_PIXEL_OFFSET = 0.5
@@ -92,3 +98,69 @@ def write_colmap(result: PoseResult, out_dir: str | Path, pose_source: str = "ma
     }
     (out / "poses.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return out
+
+
+def qvec_to_rotmat(q: np.ndarray) -> np.ndarray:
+    """Unit quaternion (w, x, y, z) -> rotation matrix."""
+    w, x, y, z = np.asarray(q, dtype=np.float64) / np.linalg.norm(q)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+@dataclass(frozen=True)
+class ModelImage:
+    name: str
+    R: np.ndarray  # world -> camera rotation
+    t: np.ndarray  # world -> camera translation (metres)
+
+    @property
+    def center(self) -> np.ndarray:
+        return -self.R.T @ self.t
+
+
+@dataclass(frozen=True)
+class ColmapModel:
+    """A COLMAP text model read back in: one shared camera, a pose per image, sparse points."""
+
+    camera: Camera
+    images: list[ModelImage]
+    points: np.ndarray  # (M, 3) metres
+
+
+def _data_lines(path: Path):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            yield line
+
+
+def read_colmap(model_dir: str | Path) -> ColmapModel:
+    """Read the text model written by :func:`write_colmap` back into memory.
+
+    Only the single-camera ``OPENCV`` models we emit are supported - training assumes one shared
+    intrinsic, which is also what ``pose`` guarantees.
+    """
+    d = Path(model_dir)
+    cam_lines = list(_data_lines(d / "cameras.txt"))
+    if len(cam_lines) != 1:
+        raise ValueError(f"expected exactly one camera in {d / 'cameras.txt'}, found {len(cam_lines)}")
+    _, model, width, height, *params = cam_lines[0].split()
+    if model != "OPENCV":
+        raise ValueError(f"unsupported camera model {model!r} (expected OPENCV)")
+    fx, fy, cx, cy, k1, k2, p1, p2 = (float(v) for v in params)
+    K = np.array([[fx, 0.0, cx - _COLMAP_PIXEL_OFFSET], [0.0, fy, cy - _COLMAP_PIXEL_OFFSET], [0.0, 0.0, 1.0]])
+    camera = Camera(int(width), int(height), K, np.array([k1, k2, p1, p2]))
+
+    # images.txt alternates a pose line and a (here unused) 2D-observation line per image.
+    images = []
+    for pose_line in list(_data_lines(d / "images.txt"))[::2]:
+        f = pose_line.split()
+        qvec = np.array([float(v) for v in f[1:5]])
+        tvec = np.array([float(v) for v in f[5:8]])
+        images.append(ModelImage(name=f[9], R=qvec_to_rotmat(qvec), t=tvec))
+
+    pts = [[float(v) for v in line.split()[1:4]] for line in _data_lines(d / "points3D.txt")]
+    return ColmapModel(camera, images, np.asarray(pts, dtype=np.float64).reshape(-1, 3))

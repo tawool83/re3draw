@@ -7,13 +7,14 @@ The trick: camera poses are captured at shooting time (printed ChArUco marker ma
 LiDAR depth) instead of being guessed from the photos, so the hardest step (SfM) is skipped and the
 result has real-world scale.
 
-> Status: **v0.1, milestone M1** — marker mat + camera pose module. Nothing is published yet.
+> Status: **v0.1, milestone M2** — marker mat, camera poses, and splat training. The viewer is
+> next; nothing is published yet.
 
 ## Packages
 
 | Path | Package | Status |
 | --- | --- | --- |
-| [`packages/worker`](packages/worker) | `re3draw-worker` (Python) — mat PDF, poses, COLMAP export, training | M1 ✅ poses · M2 training |
+| [`packages/worker`](packages/worker) | `re3draw-worker` (Python) — mat PDF, poses, COLMAP export, training | M1 ✅ poses · M2 ✅ training |
 | [`packages/viewer`](packages/viewer) | `@re3draw/viewer` — Three.js + Spark viewer shared by web and Flutter | M2 |
 | [`packages/sdk-js`](packages/sdk-js) | `@re3draw/sdk` — upload / job status / load | M3 |
 | [`packages/flutter`](packages/flutter) | `re3draw` — ring capture guide, ARCore / ARKit, LiDAR, viewer widget | M4 |
@@ -34,6 +35,16 @@ re3draw-worker mat --board a3 -o mat_a3.pdf       # print at 100 %, check the 10
 re3draw-worker synth out/synth                     # or photograph a real object on the mat
 re3draw-worker pose out/synth/images --board a3 -o out/synth/sparse/0
 ```
+
+## Try M2 (needs an NVIDIA GPU)
+
+```bash
+bash packages/worker/scripts/setup-gpu.sh                  # on a rented or local CUDA box
+re3draw-worker train out/synth -o out/synth/splat          # -> splat.ply, splat.spz, train.json
+```
+
+Renting a GPU costs about 70 won per object; see [docs/m2-gpu-training.md](docs/m2-gpu-training.md)
+for which machine to rent, how to get photos onto it, and how to read the result.
 
 ## License
 

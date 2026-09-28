@@ -3,6 +3,7 @@
   re3draw-worker mat   --board a3 -o mat_a3.pdf
   re3draw-worker pose  PHOTOS_DIR --board a3 -o sparse/0
   re3draw-worker synth OUT_DIR --board a3        (synthetic ring capture + ground truth)
+  re3draw-worker train CAPTURE_DIR -o OUT_DIR    (gsplat training -> .ply / .spz; needs a GPU)
 """
 
 from __future__ import annotations
@@ -14,9 +15,10 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from .boards import BOARDS, get_board
-from .colmap import write_colmap
+from .colmap import read_colmap, write_colmap
 from .mat import save_pdf
 from .pose import PoseError, estimate_poses
 
@@ -68,6 +70,48 @@ def _cmd_synth(args) -> int:
     return 0
 
 
+def _cmd_train(args) -> int:
+    # Imported here so that `mat`, `pose` and `synth` keep working without torch / gsplat installed.
+    from .dataset import load_capture, object_box
+    from .splat import SpzUnavailable, write_ply, write_spz
+    from .train import BackendMissing, TrainConfig, require_backend, train
+
+    try:
+        require_backend()
+    except BackendMissing as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 3
+
+    capture_dir = Path(args.capture)
+    images_dir = Path(args.images) if args.images else capture_dir / "images"
+    sparse_dir = Path(args.sparse) if args.sparse else capture_dir / "sparse" / "0"
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+
+    model = read_colmap(sparse_dir)
+    box = object_box(get_board(args.board), width_m=args.object_width, height_m=args.object_height)
+    capture = load_capture(model, images_dir, box, max_size=args.max_size)
+    print(f"{len(capture.views)} views at {capture.width}x{capture.height}, "
+          f"object box {np.round(box.size * 100, 1).tolist()} cm")
+
+    cfg = TrainConfig(iterations=args.iters, cap_max=args.cap, sh_degree=args.sh_degree,
+                      val_every=args.val_every, seed=args.seed, device=args.device)
+    cloud, metrics = train(capture, cfg)
+
+    ply = write_ply(cloud, out / "splat.ply")
+    metrics["files"] = {"ply": ply.name}
+    if not args.no_spz:
+        try:
+            metrics["files"]["spz"] = write_spz(ply, out / "splat.spz").name
+        except SpzUnavailable as e:
+            metrics["spz_skipped"] = str(e)
+            print(f"note: {e}")
+    metrics["capture"] = {"images": str(images_dir), "sparse": str(sparse_dir)}
+    (out / "train.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    print(json.dumps(metrics, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="re3draw-worker")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -90,6 +134,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--board", choices=boards, default="a3")
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=_cmd_synth)
+
+    p = sub.add_parser("train", help="gsplat training on a posed capture -> .ply / .spz splat")
+    p.add_argument("capture", help="directory holding images/ and sparse/0/")
+    p.add_argument("--images", help="override the photo directory")
+    p.add_argument("--sparse", help="override the COLMAP model directory")
+    p.add_argument("--board", choices=boards, default="a3")
+    p.add_argument("-o", "--output", required=True)
+    p.add_argument("--iters", type=int, default=30000)
+    p.add_argument("--cap", type=int, default=1000000, help="maximum number of gaussians")
+    p.add_argument("--max-size", type=int, default=1600, help="longest image side used for training")
+    p.add_argument("--sh-degree", type=int, default=3, choices=[0, 1, 2, 3])
+    p.add_argument("--val-every", type=int, default=8, help="hold out every Nth photo (0 = train on all)")
+    p.add_argument("--object-width", type=float, help="object width in metres (default: what the mat supports)")
+    p.add_argument("--object-height", type=float, help="object height in metres")
+    p.add_argument("--device", help="cuda, cuda:1, cpu (default: cuda when available)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-spz", action="store_true", help="write only the .ply")
+    p.set_defaults(func=_cmd_train)
 
     args = parser.parse_args(argv)
     return args.func(args)
