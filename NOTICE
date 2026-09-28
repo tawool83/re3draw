@@ -1,0 +1,8 @@
+re3draw
+Copyright 2026 re3draw contributors
+
+This product depends on the following third-party software:
+
+- OpenCV (Apache-2.0) - https://opencv.org
+- NumPy (BSD-3-Clause) - https://numpy.org
+- Pillow (MIT-CMU / HPND) - https://python-pillow.org

@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+
+# Flutter / Dart
+.dart_tool/
+build/
+
+# Local tooling state
+.bkit/
+.idea/
+.vscode/
+.DS_Store
+
+# Generated data
+/out/
+*.pdf
