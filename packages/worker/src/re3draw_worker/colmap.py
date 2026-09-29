@@ -154,9 +154,15 @@ def read_colmap(model_dir: str | Path) -> ColmapModel:
     K = np.array([[fx, 0.0, cx - _COLMAP_PIXEL_OFFSET], [0.0, fy, cy - _COLMAP_PIXEL_OFFSET], [0.0, 0.0, 1.0]])
     camera = Camera(int(width), int(height), K, np.array([k1, k2, p1, p2]))
 
-    # images.txt alternates a pose line and a (here unused) 2D-observation line per image.
+    # images.txt alternates a pose line and a (here unused) 2D-observation line per image. The
+    # observation line is empty for an image with no 2D points, so it has to be consumed by
+    # position rather than filtered out with the comments.
     images = []
-    for pose_line in list(_data_lines(d / "images.txt"))[::2]:
+    lines = iter((d / "images.txt").read_text(encoding="utf-8").splitlines())
+    for pose_line in lines:
+        if not pose_line.strip() or pose_line.lstrip().startswith("#"):
+            continue
+        next(lines, None)
         f = pose_line.split()
         qvec = np.array([float(v) for v in f[1:5]])
         tvec = np.array([float(v) for v in f[5:8]])

@@ -29,6 +29,25 @@ def test_read_colmap_roundtrips_the_written_model(capture_dir):
     assert len(model.points) == len({int(i) for v in result.views for i in v.detection.ids})
 
 
+def test_read_colmap_keeps_images_without_2d_points(capture_dir, tmp_path):
+    """COLMAP writes an empty observation line for an image with no points; it must not shift pairing."""
+    _, root, result = capture_dir
+    src = root / "sparse" / "0"
+    dst = tmp_path / "sparse"
+    dst.mkdir()
+    for name in ("cameras.txt", "points3D.txt"):
+        (dst / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
+    lines = (src / "images.txt").read_text(encoding="utf-8").splitlines()
+    first_obs = next(i for i, l in enumerate(lines) if not l.startswith("#")) + 1
+    lines[first_obs] = ""  # first image now has no 2D points
+    (dst / "images.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    model = read_colmap(dst)
+    assert [i.name for i in model.images] == [v.name for v in result.views]
+    for entry, view in zip(model.images, result.views):
+        np.testing.assert_allclose(entry.t, view.t, atol=1e-7)
+
+
 def test_rectified_photos_are_pinhole(capture_dir):
     """Undistorted images must reproject with the new K and *no* distortion.
 
