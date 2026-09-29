@@ -14,3 +14,8 @@ Training and segmentation (packages/worker, GPU worker only):
 - spz (MIT) - https://github.com/nianticlabs/spz
 - Hugging Face Transformers (Apache-2.0) - https://github.com/huggingface/transformers
 - SAM 2.1 model weights, facebook/sam2.1-hiera-base-plus (Apache-2.0) - https://github.com/facebookresearch/sam2
+
+Viewer (packages/viewer):
+
+- three.js (MIT) - https://threejs.org
+- Spark (MIT) - https://github.com/sparkjsdev/spark

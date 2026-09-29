@@ -1,7 +1,7 @@
 # 진행 상황 / 개발 환경 메모
 
 > 여러 PC(회사 Windows, 집 Mac)에서 이어서 개발하기 위한 메모. 새 PC에서 시작할 때 이 문서부터 본다.
-> 최종 업데이트 2026-09-29 (SAM 2 물체 분리로 배경 커튼 해결)
+> 최종 업데이트 2026-09-29 (뷰어 착수: 스플랫 표시 + 좌표계 확정)
 
 ## 현재 상태
 
@@ -11,7 +11,7 @@
 | M2 학습 워커 | ✅ 합성 데이터에서 동작 | `re3draw-worker segment` (SAM 2) + `train` (gsplat). 배경 커튼 해결 |
 | M2 GPU 실행 환경 | ✅ Modal 연결 완료 | `packages/worker/modal_app.py`. GPU 자체 테스트 48개 통과 (L4) |
 | M2 실물 촬영 검증 | ⏳ 대기 | [m2-real-capture-test.md](m2-real-capture-test.md) |
-| M2 뷰어 | ⏳ 대기 | `packages/viewer` |
+| M2 뷰어 | ✅ 스플랫 표시 동작 | `packages/viewer`. `npm run dev`로 `.ply`/`.spz`를 눈으로 확인 |
 
 ### GPU를 Modal로 정한 이유
 
@@ -61,12 +61,27 @@ python -m modal volume get --force re3draw-captures _diag/2000-512 ../../out/
 3. ~~Dockerfile / setup-gpu.sh 설치 버그~~ ✅ (2026-09-29): Ubuntu 22.04(Python 3.10) 기반 +
    `--extra-index-url` + `python3-dev`(spz 빌드) + pip 업그레이드. Modal에서 Dockerfile 그대로 빌드해 테스트 48개 통과
 
+### 뷰어 (2026-09-29)
+
+`packages/viewer` — Three.js + Spark(MIT). `npm run dev`로 데모가 뜨고 `splat 열기`로 로컬
+`.ply` / `.spz`를 바로 확인할 수 있다. 이로써 "결과를 눈으로 볼 도구가 없다"는 제약이 풀렸다.
+
+- **좌표계를 실측으로 확정했다.** Spark은 splat 파일을 **그대로** 읽는다(뒤집지 않는다).
+  Spark 문서에 없는 내용이라 기준 도형(`test/fixtures/axes.ply`)을 만들어 디코딩 결과를 대조해
+  확인했다. 따라서 Z-up(re3draw) → Y-up(Three.js) 변환은 뷰어가 직접 한다: `(x, y, z) → (x, z, -y)`.
+  이 변환이면 물체의 정면(−Y)이 Three.js 기본 카메라 쪽(+Z)을 향한다.
+- 실제 치수를 쓴다: 카메라 거리와 near/far를 물체 크기에서 계산하고, 바닥 격자는 1cm 눈금이다.
+  (기본 near 0.1은 12cm 물체를 통째로 삼킨다.)
+- 테스트 23개. 순수 계산은 node에서, 실제 렌더링은 헤드리스 Chromium(SwiftShader)에서 픽셀을
+  검사한다 — 흰 캡이 위쪽 절반에, 빨강(+X)이 오른쪽 절반에 있는지. GPU 없이 돈다.
+
 ### 다음 할 일
 
 1. 실물 촬영으로 오리기 품질 확인 (합성은 단색 원통이라 쉬운 편)
 2. 7,000회 / 30,000회 비교 (실물 촬영본으로)
-3. `docs/m2-gpu-training.md`를 Modal 중심으로 개편
-4. 실물 촬영 검증 ([m2-real-capture-test.md](m2-real-capture-test.md))
+3. 실물 촬영 검증 ([m2-real-capture-test.md](m2-real-capture-test.md))
+4. 뷰어: 모바일 터치 조작 다듬기, 큰 splat용 LOD 연결 (Spark 지원), `.glb` 메시는 워커가
+   메시를 만들게 된 뒤
 
 ### 나중에 할 일 (보류)
 

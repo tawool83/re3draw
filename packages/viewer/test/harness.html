@@ -1,0 +1,77 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>harness</title>
+<style>html,body{margin:0;background:#000} #stage{width:400px;height:300px}</style>
+</head><body>
+<div id="stage"></div>
+<script type="module">
+import { PackedSplats, SplatFileType, unpackSplat } from "@sparkjsdev/spark";
+import { SplatViewer } from "/src/index.ts";
+
+/** Decode a splat file without any viewer, to see what Spark does to the coordinates. */
+window.decode = async (url) => {
+  const fileBytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const packed = new PackedSplats({ fileBytes, fileType: SplatFileType.PLY });
+  await packed.initialized;
+  const splats = [];
+  for (let i = 0; i < packed.numSplats; i++) {
+    const s = unpackSplat(packed.packedArray, i, packed.splatEncoding);
+    splats.push({ p: [s.center.x, s.center.y, s.center.z], c: [s.color.r, s.color.g, s.color.b],
+                  s: [s.scales.x, s.scales.y, s.scales.z], o: s.opacity });
+  }
+  return { numSplats: packed.numSplats, splats };
+};
+
+/** Render `url` in the viewer and return statistics over the framebuffer pixels. */
+window.renderShot = async (url) => {
+  const viewer = new SplatViewer({ target: document.getElementById("stage"), ground: false });
+  const loaded = await viewer.load(url);
+
+  const gl = viewer.renderer;
+  const { width, height } = gl.domElement;
+  const c2d = document.createElement("canvas");
+  c2d.width = width; c2d.height = height;
+  const ctx = c2d.getContext("2d", { willReadFrequently: true });
+
+  // Spark uploads and sorts splats asynchronously, so the first frames after load() resolves are
+  // still empty. Poll until the frame stops being a flat background, rather than guessing a delay.
+  let data = null;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => requestAnimationFrame(r));
+    gl.render(viewer.scene, viewer.camera);   // read the buffer in the same task it is drawn
+    ctx.drawImage(gl.domElement, 0, 0);
+    data = ctx.getImageData(0, 0, width, height).data;
+    const first = `${data[0]},${data[1]},${data[2]}`;
+    let varied = false;
+    for (let i = 4; i < data.length && !varied; i += 4) {
+      varied = `${data[i]},${data[i + 1]},${data[i + 2]}` !== first;
+    }
+    if (varied) break;
+  }
+
+  const pick = (test) => {
+    let n = 0, sx = 0, sy = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (!test(data[i], data[i + 1], data[i + 2])) continue;
+      const index = i / 4;
+      n++; sx += index % width; sy += Math.floor(index / width);
+    }
+    return n ? { n, x: sx / n / width, y: sy / n / height } : { n: 0 };
+  };
+  const colours = new Set();
+  for (let i = 0; i < data.length; i += 4) colours.add(`${data[i]},${data[i + 1]},${data[i + 2]}`);
+
+  return {
+    width, height,
+    splats: loaded.splats,
+    box: loaded.box,
+    distinctColours: colours.size,
+    white: pick((r, g, b) => r > 170 && g > 170 && b > 170),
+    red: pick((r, g, b) => r > 110 && r - g > 55 && r - b > 55),
+    blue: pick((r, g, b) => b > 110 && b - r > 45 && b - g > 30),
+    yellow: pick((r, g, b) => r > 130 && g > 110 && b < 90),
+  };
+};
+window.READY = true;
+</script>
+</body></html>

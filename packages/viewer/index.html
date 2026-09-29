@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>re3draw viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100dvh; display: flex; flex-direction: column;
+         font: 14px/1.5 system-ui, -apple-system, sans-serif; background: #14161a; color: #e6e8ea; }
+  header { display: flex; gap: 12px; align-items: center; padding: 10px 14px;
+           border-bottom: 1px solid #262a30; flex-wrap: wrap; }
+  header strong { font-weight: 600; letter-spacing: .02em; }
+  #status { color: #98a2ad; font-variant-numeric: tabular-nums; }
+  #stage { flex: 1; min-height: 0; }
+  button, label.file { background: #232830; border: 1px solid #333a44; color: inherit;
+           padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; }
+  button:hover, label.file:hover { background: #2b313a; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+  <header>
+    <strong>re3draw viewer</strong>
+    <button id="reset">정면으로</button>
+    <label class="file">splat 열기<input id="file" type="file" accept=".ply,.spz,.splat,.ksplat,.sog" /></label>
+    <span id="status">로딩 중…</span>
+  </header>
+  <div id="stage"></div>
+
+  <script type="module">
+    import { SplatViewer } from "./src/index.ts";
+
+    const status = document.getElementById("status");
+    const viewer = new SplatViewer({
+      target: document.getElementById("stage"),
+      ground: true,
+      onProgress: (f) => { status.textContent = `내려받는 중 ${Math.round(f * 100)}%`; },
+    });
+
+    const show = (name) => async (loaded) => {
+      const size = loaded.box.upper.map((u, i) => (u - loaded.box.lower[i]) * 100);
+      status.textContent =
+        `${name} · 가우시안 ${loaded.splats.toLocaleString()}개 · ` +
+        `크기 ${size.map((v) => v.toFixed(1)).join(" x ")} cm`;
+    };
+
+    viewer.load("./test/fixtures/axes.ply").then(show("axes.ply (기준 도형)"))
+      .catch((e) => { status.textContent = `실패: ${e.message}`; });
+
+    document.getElementById("file").addEventListener("change", (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      status.textContent = "여는 중…";
+      viewer.load(file).then(show(file.name)).catch((err) => { status.textContent = `실패: ${err.message}`; });
+    });
+
+    document.getElementById("reset").addEventListener("click", () => {
+      viewer.frame();
+    });
+  </script>
+</body>
+</html>
