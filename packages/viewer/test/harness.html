@@ -4,7 +4,7 @@
 </head><body>
 <div id="stage"></div>
 <script type="module">
-import { PackedSplats, SplatFileType, unpackSplat } from "@sparkjsdev/spark";
+import { PackedSplats, SplatFileType, unpackSplat, writeSpz } from "@sparkjsdev/spark";
 import { SplatViewer } from "/src/index.ts";
 
 /** Decode a splat file without any viewer, to see what Spark does to the coordinates. */
@@ -72,6 +72,21 @@ window.renderShot = async (url) => {
     yellow: pick((r, g, b) => r > 130 && g > 110 && b < 90),
   };
 };
+/** What SPZ generation does Spark itself speak? Writing one and reading its magic is the only
+    way to tell: the docs do not say, and it decides whether our worker's .spz is loadable. */
+window.spzGeneration = async (url) => {
+  const fileBytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+  const packed = new PackedSplats({ fileBytes, fileType: SplatFileType.PLY });
+  await packed.initialized;
+  const written = writeSpz(packed, 0).fileBytes;
+  const readBack = new PackedSplats({ fileBytes: written, fileType: SplatFileType.SPZ });
+  await readBack.initialized;
+  return {
+    magic: [...written.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join(" "),
+    roundTripSplats: readBack.numSplats,
+  };
+};
+
 window.READY = true;
 </script>
 </body></html>

@@ -129,3 +129,21 @@ describe("the viewer renders the object the right way up", () => {
     expect(shot.yellow.n).toBeLessThan(shot.white.n);
   });
 });
+
+describe("Spark's SPZ generation", () => {
+  /**
+   * A canary, not a feature test. The worker writes `.spz` with Niantic's reference encoder, which
+   * emits version 4 (magic "NGSP", ZSTD streams). No released Spark decodes that - it handles the
+   * gzip-wrapped versions 1-3 - so the viewer has to be fed the `.ply` instead. When this test
+   * starts failing, Spark has moved to v4 and the viewer can take the 15x smaller file.
+   */
+  it("still writes gzip-wrapped SPZ, so it cannot read the worker's v4 files", async () => {
+    const result = await harness.page.evaluate(
+      (url) => (window as never as { spzGeneration: (u: string) => Promise<never> }).spzGeneration(url),
+      FIXTURE,
+    );
+    const { magic, roundTripSplats } = result as unknown as { magic: string; roundTripSplats: number };
+    expect(roundTripSplats).toBe(1020); // Spark reads back what Spark writes
+    expect(magic.startsWith("1f 8b")).toBe(true); // gzip, not the "NGSP" plaintext header of v4
+  });
+});

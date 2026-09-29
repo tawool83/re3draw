@@ -92,7 +92,12 @@ export class SplatViewer {
     });
     // Spark loads files verbatim, so this is where the re3draw world frame becomes three.js's.
     mesh.quaternion.copy(RE3DRAW_TO_THREE);
-    await mesh.initialized;
+    try {
+      await mesh.initialized;
+    } catch (error) {
+      mesh.dispose();
+      throw describeLoadFailure(error, typeof source === "string" ? source : source.name);
+    }
     if (this.disposed) {
       mesh.dispose();
       throw new Error("viewer was disposed while loading");
@@ -172,6 +177,22 @@ export class SplatViewer {
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
+}
+
+/**
+ * Spark only decodes gzip-wrapped SPZ (versions 1-3). The current reference encoder - which the
+ * worker uses - writes version 4, which is ZSTD, so Spark reports a gzip error that says nothing
+ * about the real problem. Name it, since the answer is "load the .ply instead".
+ */
+function describeLoadFailure(error: unknown, name: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/gzip/i.test(message) && /\.spz($|\?)/i.test(name)) {
+    return new Error(
+      `${name} looks like an SPZ v4 file (ZSTD), which Spark cannot decode yet - it reads ` +
+        `versions 1-3 only. Load the .ply from the same training run instead. (${message})`,
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
 }
 
 function asCanvas(target: HTMLCanvasElement | HTMLElement): HTMLCanvasElement {

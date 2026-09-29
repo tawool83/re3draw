@@ -64,7 +64,9 @@ re3draw-worker train CAPTURE_DIR -o OUT   # CAPTURE_DIR holds images/ and sparse
 ```
 
 - `splat.ply` — the 3DGS interchange format every viewer reads
-- `splat.spz` — Niantic's format, ~10x smaller, for shipping to phones (needs the optional encoder)
+- `splat.spz` — Niantic's format, ~15x smaller, for shipping to phones (needs the optional encoder).
+  The encoder writes SPZ **version 4**, which `@re3draw/viewer` cannot display yet — Spark reads
+  versions 1-3 only. Load the `.ply` in the viewer until that is resolved.
 - `train.json` — PSNR on held-out photos, gaussian count, object box, wall-clock time
 
 Training uses gsplat's **MCMC** densification. The usual adaptive-density strategy grows gaussians

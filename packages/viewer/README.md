@@ -20,6 +20,13 @@ const { box, splats } = await viewer.load("/captures/mug/splat.spz");
 Formats come from Spark: `.ply`, `.spz`, `.splat`, `.ksplat`, `.sog`. `load()` also takes a `File`,
 so a user can open a training result straight off disk.
 
+> **Feed it the `.ply`, not the `.spz`.** The worker writes `.spz` with Niantic's reference encoder,
+> which emits **version 4** (magic `NGSP`, ZSTD streams). No released Spark decodes that — it reads
+> the gzip-wrapped versions 1–3 — so a v4 file fails with `Invalid gzip header`. `load()` catches
+> that and says so. It costs 15x in transfer size (21 MB vs 1.4 MB on the reference capture), which
+> M3 has to solve: wait for Spark, emit an older SPZ as well, or move to `.sog`.
+> `test/spark-contract.test.ts` pins Spark's current SPZ generation so the day it changes is loud.
+
 ## The coordinate frame, which is the whole problem
 
 re3draw's world is the printed mat: origin at its centre, **+X** right, **+Y** toward the top edge,
@@ -57,7 +64,7 @@ down to a dot.
 | File | Needs | Covers |
 | --- | --- | --- |
 | `test/frame.test.ts` | node | the world mapping, and that every corner of the object really projects inside the frustum |
-| `test/spark-contract.test.ts` | headless Chromium (WebGL) | what Spark does to coordinates, and that a rendered frame has up at the top and +X on the right |
+| `test/spark-contract.test.ts` | headless Chromium (WebGL) | what Spark does to coordinates, that a rendered frame has up at the top and +X on the right, and which SPZ generation Spark speaks |
 
 The fixture `test/fixtures/axes.ply` is written by
 `packages/worker/scripts/make_test_splat.py`. It is deliberately asymmetric on all three axes —
@@ -79,6 +86,7 @@ Chromium comes from Playwright and renders through SwiftShader, so the render te
 
 ## Not done yet
 
+- `.spz` loading, until Spark reads version 4 (see above)
 - `.glb` mesh display — the worker does not produce meshes yet
 - touch-gesture tuning and a mobile pass
 - progressive / level-of-detail loading for large splats (Spark supports it; not wired up)

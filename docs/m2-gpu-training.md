@@ -130,19 +130,20 @@ python -m modal volume get --force re3draw-captures _diag/2000-512 ../../out/
 | 파일 | 내용 |
 | --- | --- |
 | `splat.ply` | 모든 뷰어가 읽는 표준 형식 |
-| `splat.spz` | 약 10배 작다. 폰으로 내려보낼 때 쓴다 |
+| `splat.spz` | 약 15배 작다(실측 21.1MB → 1.4MB). **단 현재 뷰어는 못 읽는다** — PROGRESS.md의 `.spz` 항목 참고 |
 | `train.json` | 아래 지표 |
 | `modal.json` | 실제 GPU 이름, 과금된 벽시계 시간 |
 
 | 항목 | 통과 기준 | 위치 |
 | --- | --- | --- |
 | 채점용 사진 화질 | **PSNR 25dB 이상**이면 양호, 20dB 미만이면 문제 | `train.json` → `psnr_val` |
-| 학습/채점 차이 | 두 값 차이가 3dB 이내 | `psnr_train` vs `psnr_val` |
+| 학습/채점 차이 | 합성 실측이 **7~8dB**다. 그보다 크게 벌어지면 사진이 부족한 것 | `psnr_train` vs `psnr_val` |
 | 가우시안 수 | 5만~30만 (물체 오리기 사용 시) | `gaussians_exported` |
 | 오리기 성공 | 제외된 사진이 없거나 설명 가능할 것 | 실행 출력의 `object masks: N kept, rejected ...` |
 
-`psnr_val`이 `psnr_train`보다 많이 낮으면 사진이 부족하거나 각도가 치우친 것이다
-(촬영 가이드의 중간·위 링을 확인한다).
+사진 44장 기준으로 학습/채점 차이는 7~8dB가 정상이다(합성 실측 36.8 / 29.1dB). 이 문서가 처음에
+적었던 "3dB 이내"는 근거 없는 추정이었고 실측과 맞지 않아 고쳤다. 실물 촬영본으로 다시 보정한다.
+차이가 이보다 훨씬 크면 사진이 부족하거나 각도가 치우친 것이다(중간·위 링을 확인한다).
 
 ## 비용
 
@@ -189,7 +190,7 @@ re3draw-worker train   /workspace/capture1 -o /workspace/capture1/splat
 - **`.glb` 메시는 아직 없다.** 스플랫에서 메시를 뽑는 것은 별도의 문제이고, 학습 방식 자체를
   바꾸거나 깊이 맵을 융합하는 단계가 필요하다. 뷰어는 `.ply` / `.spz`로 먼저 붙인다.
 - **결과 확인은 뷰어로 한다.** `packages/viewer`에서 `npm run dev` 후 `splat 열기`로
-  내려받은 `splat.ply` / `splat.spz`를 연다.
+  내려받은 **`splat.ply`**를 연다. `.spz`는 버전 4라 Spark이 아직 못 읽는다(PROGRESS.md 참고).
 - **물체가 매트 중앙을 덮고 있어야 한다.** 오리기 힌트가 매트 중심 위의 한 점이라, 도넛처럼
   가운데가 빈 물체는 실패할 수 있다. 그런 경우는 `--no-segment`로 상자 기준 학습을 쓴다.
 - **밑면은 복원되지 않는다.** 찍히지 않은 곳에는 정보가 없다.
