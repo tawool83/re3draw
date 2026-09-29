@@ -30,15 +30,18 @@ if not torch.cuda.is_available():
     sys.exit("   torch cannot see the GPU - wrong image or driver mismatch.")
 PY
 
-# gsplat compiles CUDA kernels. Prebuilt wheels exist for common torch/CUDA pairs and install in
-# seconds; the source build works everywhere but takes several minutes and needs nvcc.
+# gsplat compiles CUDA kernels. Prebuilt wheels exist only for some torch/CUDA pairs (up to torch
+# 2.4) and only for Python 3.10; they install in seconds. The wheel index is added *alongside* PyPI
+# (--extra-index-url) because with --index-url pip cannot find gsplat's own dependencies. Anywhere
+# else pip falls back to PyPI's gsplat, which compiles its kernels on first use and needs nvcc.
 tag="$("$python" -c "import torch; v=torch.__version__.split('+')[0].split('.'); c=(torch.version.cuda or '').replace('.',''); print(f'pt{v[0]}{v[1]}cu{c}')")"
-echo "==> gsplat (trying prebuilt wheels for $tag)"
-"$python" -m pip install -q ninja
-if ! "$python" -m pip install -q gsplat --index-url "https://docs.gsplat.studio/whl/$tag"; then
-    echo "   no wheel for $tag; building from source (several minutes)"
-    "$python" -m pip install gsplat
+pyver="$("$python" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+echo "==> gsplat (prebuilt wheels for $tag, Python $pyver)"
+if [ "$pyver" != "3.10" ]; then
+    echo "   note: prebuilt wheels are Python 3.10 only; expect a CUDA compile on first training run"
 fi
+"$python" -m pip install -q ninja
+"$python" -m pip install -q gsplat --extra-index-url "https://docs.gsplat.studio/whl/$tag"
 
 echo "==> re3draw-worker"
 "$python" -m pip install -q -e "$here[dev]"
