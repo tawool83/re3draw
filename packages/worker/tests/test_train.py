@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from re3draw_worker.colmap import read_colmap
-from re3draw_worker.dataset import default_object_box, load_capture
+from re3draw_worker.dataset import default_object_box, load_capture, split_views
 from re3draw_worker.splat import sh_coeffs, write_ply
 
 torch = pytest.importorskip("torch")
@@ -74,7 +74,9 @@ def test_short_training_run_improves_and_exports(capture, tmp_path):
     pytest.importorskip("gsplat")
     cfg = TrainConfig(iterations=300, init_points=5_000, cap_max=20_000, sh_degree=1,
                       val_every=4, log_every=0, seed=0)
-    before = evaluate(_init_params(capture, cfg, "cuda"), capture, capture.views[:4], 1, "cuda")
+    _, val_views = split_views(capture.views, cfg.val_every)
+    # Same held-out views before and after: comparing different photos says nothing about training.
+    before = evaluate(_init_params(capture, cfg, "cuda"), capture, val_views, 1, "cuda")
     cloud, metrics = train(capture, cfg, on_log=lambda _: None)
 
     assert 0 < len(cloud) <= cfg.cap_max
@@ -85,7 +87,10 @@ def test_short_training_run_improves_and_exports(capture, tmp_path):
     assert metrics["device"] == "cuda"
 
     # The box constraint must hold at the end, not just at initialisation.
-    assert capture.box.contains(cloud.means).all()
+    # Clamped in float32 on the GPU, so allow float32 rounding at the box faces.
+    eps = 1e-6
+    assert ((cloud.means >= capture.box.lower - eps) & (cloud.means <= capture.box.upper + eps)).all()
+    assert np.exp(cloud.scales).max() <= cfg.max_scale_frac * capture.box.size.max() * (1 + 1e-5)
     assert np.isfinite(cloud.means).all() and np.isfinite(cloud.scales).all()
     assert write_ply(cloud, tmp_path / "splat.ply").exists()
 

@@ -38,6 +38,10 @@ class TrainConfig:
     opacity_reg: float = 0.01  # MCMC needs these to stop it hoarding faint, huge gaussians
     scale_reg: float = 0.01
     min_opacity: float = 0.005
+    # Largest gaussian axis as a fraction of the object box's longest side. Positions are clamped
+    # to the box, but without this a gaussian at the box edge can stretch far outside it and show
+    # up as long streaks across the mat.
+    max_scale_frac: float = 0.1
     seed: int = 0
     device: str | None = None
     log_every: int = 500
@@ -233,6 +237,7 @@ def train(capture: Capture, cfg: TrainConfig | None = None, on_log=print) -> tup
     window = _gaussian_window(11, 1.5, device, torch.float32)
     lower = torch.tensor(capture.box.lower, dtype=torch.float32, device=device)
     upper = torch.tensor(capture.box.upper, dtype=torch.float32, device=device)
+    max_log_scale = math.log(cfg.max_scale_frac * float(np.max(capture.box.size)))
     rng = np.random.default_rng(cfg.seed)
     order: list[int] = []
 
@@ -264,8 +269,9 @@ def train(capture: Capture, cfg: TrainConfig | None = None, on_log=print) -> tup
             opt.step()
             opt.zero_grad(set_to_none=True)
         strategy.step_post_backward(params, optimizers, state, step, info, lr=means_lr)
-        with torch.no_grad():  # keep the population inside the metric object box
-            params["means"].data.clamp_(lower, upper)
+        with torch.no_grad():  # keep the population inside the metric object box, and small enough
+            params["means"].data.clamp_(lower, upper)  # not to reach far out of it
+            params["scales"].data.clamp_(max=max_log_scale)
 
         if cfg.log_every and (step + 1) % cfg.log_every == 0:
             on_log(f"  step {step + 1}/{cfg.iterations}  loss {float(loss):.4f}  "
