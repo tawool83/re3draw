@@ -3,6 +3,7 @@
   re3draw-worker mat   --board a3 -o mat_a3.pdf
   re3draw-worker pose  PHOTOS_DIR --board a3 -o sparse/0
   re3draw-worker synth OUT_DIR --board a3        (synthetic ring capture + ground truth)
+  re3draw-worker segment CAPTURE_DIR             (object masks with SAM 2 -> CAPTURE_DIR/masks)
   re3draw-worker train CAPTURE_DIR -o OUT_DIR    (gsplat training -> .ply / .spz; needs a GPU)
 """
 
@@ -90,9 +91,16 @@ def _cmd_train(args) -> int:
 
     model = read_colmap(sparse_dir)
     box = object_box(get_board(args.board), width_m=args.object_width, height_m=args.object_height)
-    capture = load_capture(model, images_dir, box, max_size=args.max_size)
+    masks_dir = None if args.no_masks else Path(args.masks) if args.masks else capture_dir / "masks"
+    if masks_dir is not None and not masks_dir.is_dir():
+        if args.masks:
+            print(f"error: {masks_dir} does not exist", file=sys.stderr)
+            return 2
+        masks_dir = None  # no `segment` run: fall back to the object box alone
+    capture = load_capture(model, images_dir, box, max_size=args.max_size, masks_dir=masks_dir)
     print(f"{len(capture.views)} views at {capture.width}x{capture.height}, "
-          f"object box {np.round(box.size * 100, 1).tolist()} cm")
+          f"object box {np.round(box.size * 100, 1).tolist()} cm, "
+          f"object masks: {masks_dir or 'none (background may leak in)'}")
 
     cfg = TrainConfig(iterations=args.iters, cap_max=args.cap, sh_degree=args.sh_degree,
                       val_every=args.val_every, seed=args.seed, device=args.device)
@@ -106,9 +114,24 @@ def _cmd_train(args) -> int:
         except SpzUnavailable as e:
             metrics["spz_skipped"] = str(e)
             print(f"note: {e}")
-    metrics["capture"] = {"images": str(images_dir), "sparse": str(sparse_dir)}
+    metrics["capture"] = {"images": str(images_dir), "sparse": str(sparse_dir),
+                          "masks": str(masks_dir) if masks_dir else None}
     (out / "train.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps(metrics, indent=2))
+    return 0
+
+
+def _cmd_segment(args) -> int:
+    from .dataset import object_box
+    from .segment import DEFAULT_MODEL, Sam2Segmenter, segment_capture
+
+    capture_dir = Path(args.capture)
+    model = read_colmap(capture_dir / "sparse" / "0")
+    box = object_box(get_board(args.board), width_m=args.object_width, height_m=args.object_height)
+    report = segment_capture(model, capture_dir / "images", box, capture_dir / "masks",
+                             Sam2Segmenter(args.model or DEFAULT_MODEL), overwrite=args.overwrite)
+    print(json.dumps({"masks": str(capture_dir / "masks"), "kept": len(report["kept"]),
+                      "rejected": report["rejected"]}))
     return 0
 
 
@@ -135,6 +158,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.set_defaults(func=_cmd_synth)
 
+    p = sub.add_parser("segment", help="object masks with SAM 2, prompted from the mat -> masks/")
+    p.add_argument("capture", help="directory holding images/ and sparse/0/")
+    p.add_argument("--board", choices=boards, default="a3")
+    p.add_argument("--object-width", type=float, help="object width in metres (default: what the mat supports)")
+    p.add_argument("--object-height", type=float, help="object height in metres")
+    p.add_argument("--model", help="Hugging Face SAM 2 checkpoint")
+    p.add_argument("--overwrite", action="store_true", help="re-segment photos that already have a mask")
+    p.set_defaults(func=_cmd_segment)
+
     p = sub.add_parser("train", help="gsplat training on a posed capture -> .ply / .spz splat")
     p.add_argument("capture", help="directory holding images/ and sparse/0/")
     p.add_argument("--images", help="override the photo directory")
@@ -151,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", help="cuda, cuda:1, cpu (default: cuda when available)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-spz", action="store_true", help="write only the .ply")
+    p.add_argument("--masks", help="object mask directory (default: CAPTURE/masks when it exists)")
+    p.add_argument("--no-masks", action="store_true", help="ignore object masks, use the object box only")
     p.set_defaults(func=_cmd_train)
 
     args = parser.parse_args(argv)

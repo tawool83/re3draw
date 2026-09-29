@@ -7,7 +7,10 @@ Three things happen here that are specific to re3draw, and all three come from k
 2. **A metric object box.** Because the mat fixes real-world scale and the object sits at the
    origin, we know where the object is *before* training. Gaussians are confined to that box.
 3. **A loss mask.** Only the part of each photo covered by that box is compared against the render,
-   so the room behind the object never becomes something training has to explain.
+   so the room outside it never becomes something training has to explain.
+
+Optionally (``masks_dir``, written by :mod:`.segment`) each view also gets an **object mask**. Inside
+the box it separates the object from the background seen *behind* it, which the box alone cannot.
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ class View:
     mask: np.ndarray  # (H, W) bool - pixels the loss is computed on
     R: np.ndarray  # world -> camera rotation
     t: np.ndarray  # world -> camera translation
+    fg: np.ndarray | None = None  # (H, W) float32 in [0, 1] - object, when segmented; None = unknown
 
     @property
     def viewmat(self) -> np.ndarray:
@@ -155,8 +159,14 @@ def load_capture(
     images_dir: str | Path,
     box: ObjectBox,
     max_size: int = 1600,
+    masks_dir: str | Path | None = None,
 ) -> Capture:
-    """Load and rectify every posed photo. Photos named in the model but missing on disk are skipped."""
+    """Load and rectify every posed photo. Photos named in the model but missing on disk are skipped.
+
+    With ``masks_dir``, photos with a ``<name>.png`` there get it as their object mask, put through
+    the same undistortion, crop and resize as the photo. Photos without one (segmentation rejected
+    them) train on the object box alone.
+    """
     images_dir = Path(images_dir)
     map1, map2, K, (x, y, w, h), _ = _undistort_map(model.camera, max_size)
     out_w, out_h = 0, 0
@@ -169,17 +179,29 @@ def load_capture(
         if (bgr.shape[1], bgr.shape[0]) != (model.camera.width, model.camera.height):
             raise ValueError(f"{entry.name} is {bgr.shape[1]}x{bgr.shape[0]}, model says "
                              f"{model.camera.width}x{model.camera.height}")
-        rect = cv2.remap(bgr, map1, map2, cv2.INTER_LINEAR)[y:y + h, x:x + w]
-        if max(w, h) > max_size:
-            scale = max_size / max(w, h)
-            rect = cv2.resize(rect, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+        rect = _rectify(bgr, map1, map2, (x, y, w, h), max_size)
         out_h, out_w = rect.shape[:2]
         rgb = cv2.cvtColor(rect, cv2.COLOR_BGR2RGB)
-        views.append(View(entry.name, rgb, box_mask(box, entry.R, entry.t, K, out_w, out_h), entry.R, entry.t))
+        mask = box_mask(box, entry.R, entry.t, K, out_w, out_h)
+        fg = None
+        if masks_dir is not None:
+            m = cv2.imread(str(Path(masks_dir) / f"{entry.name}.png"), cv2.IMREAD_GRAYSCALE)
+            if m is not None:
+                fg = _rectify(m, map1, map2, (x, y, w, h), max_size).astype(np.float32) / 255.0 * mask
+        views.append(View(entry.name, rgb, mask, entry.R, entry.t, fg))
 
     if not views:
         raise ValueError(f"none of the {len(model.images)} posed photos were found in {images_dir}")
     return Capture(K=K, width=out_w, height=out_h, views=views, box=box)
+
+
+def _rectify(img: np.ndarray, map1, map2, roi: tuple[int, int, int, int], max_size: int) -> np.ndarray:
+    x, y, w, h = roi
+    rect = cv2.remap(img, map1, map2, cv2.INTER_LINEAR)[y:y + h, x:x + w]
+    if max(w, h) > max_size:
+        scale = max_size / max(w, h)
+        rect = cv2.resize(rect, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+    return rect
 
 
 def split_views(views: list[View], val_every: int) -> tuple[list[View], list[View]]:
@@ -207,7 +229,7 @@ def sample_colors(points: np.ndarray, capture: Capture) -> np.ndarray:
         uv[in_front] = (cam[in_front] @ capture.K.T)[:, :2] / cam[in_front, 2:3]
         px = np.round(uv).astype(np.int64)
         ok = in_front & (px[:, 0] >= 0) & (px[:, 0] < capture.width) & (px[:, 1] >= 0) & (px[:, 1] < capture.height)
-        ok[ok] &= v.mask[px[ok, 1], px[ok, 0]]
+        ok[ok] &= v.mask[px[ok, 1], px[ok, 0]] if v.fg is None else v.fg[px[ok, 1], px[ok, 0]] > 0.5
         total[ok] += v.image[px[ok, 1], px[ok, 0]] / 255.0
         count += ok
     seen = count > 0

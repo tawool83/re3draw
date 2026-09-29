@@ -25,6 +25,7 @@ class SyntheticView:
     R: np.ndarray
     t: np.ndarray
     ring: int
+    object_mask: np.ndarray | None = None  # (H, W) bool, pixels showing the object: segmentation truth
 
     @property
     def center(self) -> np.ndarray:
@@ -62,6 +63,20 @@ class Renderer:
         norm = cv2.undistortPoints(pix, K, dist).reshape(-1, 2)
         self.rays = np.hstack([norm, np.ones((len(norm), 1))]).astype(np.float64)
 
+    def object_mask(self, R: np.ndarray, t: np.ndarray, occluder=(0.06, 0.12)) -> np.ndarray:
+        """Pixels covered by the cylinder standing in for the object (it is convex: hull is exact)."""
+        w, h = self.size
+        mask = np.zeros((h, w), dtype=np.uint8)
+        if occluder:
+            radius, height = occluder
+            a = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+            ring = np.stack([radius * np.cos(a), radius * np.sin(a)], axis=1)
+            pts = np.vstack([np.hstack([ring, np.zeros((72, 1))]), np.hstack([ring, np.full((72, 1), height)])])
+            proj, _ = cv2.projectPoints(pts, cv2.Rodrigues(R)[0], t, self.K, self.dist)
+            hull = cv2.convexHull(proj.reshape(-1, 2).astype(np.float32)).astype(np.int32)
+            cv2.fillConvexPoly(mask, hull, 1)
+        return mask.astype(bool)
+
     def render(self, R: np.ndarray, t: np.ndarray, rng: np.random.Generator, occluder=(0.06, 0.12)) -> np.ndarray:
         w, h = self.size
         C = -R.T @ t
@@ -78,14 +93,7 @@ class Renderer:
             cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=95,  # table
         )
 
-        if occluder:
-            radius, height = occluder
-            a = np.linspace(0, 2 * np.pi, 72, endpoint=False)
-            ring = np.stack([radius * np.cos(a), radius * np.sin(a)], axis=1)
-            pts = np.vstack([np.hstack([ring, np.zeros((72, 1))]), np.hstack([ring, np.full((72, 1), height)])])
-            proj, _ = cv2.projectPoints(pts, cv2.Rodrigues(R)[0], t, self.K, self.dist)
-            hull = cv2.convexHull(proj.reshape(-1, 2).astype(np.float32)).astype(np.int32)
-            cv2.fillConvexPoly(img, hull, 150)
+        img[self.object_mask(R, t, occluder)] = 150
 
         gain = rng.uniform(0.8, 1.1)
         img = cv2.GaussianBlur(img.astype(np.float32) * gain, (0, 0), 0.7)
@@ -118,5 +126,6 @@ def ring_capture(
             C = np.array([r * np.cos(phi) * np.sin(theta), -r * np.cos(phi) * np.cos(theta), r * np.sin(phi)])
             target = np.array([rng.normal(0, 0.01), rng.normal(0, 0.01), 0.04])
             R, t = look_at(C, target)
-            views.append(SyntheticView(f"r{ring_idx}_{k:02d}.jpg", renderer.render(R, t, rng, occluder), R, t, ring_idx))
+            views.append(SyntheticView(f"r{ring_idx}_{k:02d}.jpg", renderer.render(R, t, rng, occluder), R, t, ring_idx,
+                                       renderer.object_mask(R, t, occluder)))
     return views, K, dist

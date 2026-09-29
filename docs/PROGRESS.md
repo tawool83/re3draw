@@ -1,15 +1,15 @@
 # 진행 상황 / 개발 환경 메모
 
 > 여러 PC(회사 Windows, 집 Mac)에서 이어서 개발하기 위한 메모. 새 PC에서 시작할 때 이 문서부터 본다.
-> 최종 업데이트 2026-09-29 (Modal 학습 첫 실측)
+> 최종 업데이트 2026-09-29 (SAM 2 물체 분리로 배경 커튼 해결)
 
 ## 현재 상태
 
 | 마일스톤 | 상태 | 비고 |
 | --- | --- | --- |
 | M1 매트 + 카메라 위치 | ✅ 완료 | `re3draw-worker mat / pose / synth` |
-| M2 학습 워커 | 🟡 GPU에서 동작 확인, 품질 개선 필요 | `re3draw-worker train` (gsplat, CUDA 필요). 아래 "품질 과제" |
-| M2 GPU 실행 환경 | ✅ Modal 연결 완료 | `packages/worker/modal_app.py`. GPU 자체 테스트 42개 통과 (L4) |
+| M2 학습 워커 | ✅ 합성 데이터에서 동작 | `re3draw-worker segment` (SAM 2) + `train` (gsplat). 배경 커튼 해결 |
+| M2 GPU 실행 환경 | ✅ Modal 연결 완료 | `packages/worker/modal_app.py`. GPU 자체 테스트 48개 통과 (L4) |
 | M2 실물 촬영 검증 | ⏳ 대기 | [m2-real-capture-test.md](m2-real-capture-test.md) |
 | M2 뷰어 | ⏳ 대기 | `packages/viewer` |
 
@@ -43,15 +43,19 @@ python -m modal volume get --force re3draw-captures _diag/2000-512 ../../out/
 
 ### 품질 과제
 
-1. **배경 커튼**: 물체 상자 안에 뒤쪽 배경이 흐릿한 막으로 학습된다. PSNR 차이 6dB의 주원인.
-   → 물체 분리(segmentation) 도입. 라이선스 허용 모델 검토 (SAM Apache-2.0, rembg MIT 등)
+1. ~~**배경 커튼**~~ ✅ 해결 (2026-09-29): SAM 2.1로 사진마다 물체를 오려서 학습
+   - 힌트: 매트 중심 1cm 위 점을 사진에 투영한 한 점. 사용자 클릭 불필요
+     (박스 힌트는 매트까지 잡아 IoU 0.00~0.23, 매트 코너를 배경 힌트로 주면 더 나빠짐 → 폐기)
+   - 결과 (합성, 2,000회, 512px): 오리기 IoU 평균 0.989 / 최소 0.986,
+     물체 PSNR 8.4dB(상자만) → **35.5dB**(학습) / **28.5dB**(채점). 사진 20장 오리기 약 20초
+   - 가정: 물체가 매트 중앙을 덮고 있어야 함 (도넛처럼 가운데가 빈 물체는 실패 가능 → 품질 검사로 걸러 상자 기준 학습)
 2. **결과물 크기**: 작은 물체에 가우시안 100만 개는 과함 → `--cap` 기본값을 20만~30만으로 낮추는 안 검토
 3. `docker/Dockerfile`, `scripts/setup-gpu.sh`에 Modal에서 고친 설치 버그가 남아 있음
    (gsplat 휠은 Python 3.10 전용, `--index-url` 대신 `--extra-index-url` 필요)
 
 ### 다음 할 일
 
-1. 물체 분리 방식 결정 → 배경 커튼 해결
+1. 실물 촬영으로 오리기 품질 확인 (합성은 단색 원통이라 쉬운 편)
 2. `--cap` 기본값 조정, 7,000회 / 30,000회 비교
 3. Dockerfile / setup-gpu.sh 설치 버그 수정
 4. `docs/m2-gpu-training.md`를 Modal 중심으로 개편

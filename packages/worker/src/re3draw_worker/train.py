@@ -146,6 +146,17 @@ def _batch(view: View, K: np.ndarray, device: str):
     return viewmat, Ks, gt, mask
 
 
+def _object_target(view: View, gt, render, alpha, bg):
+    """With an object mask: composite both sides over ``bg``, so the object is fitted and every
+    non-object pixel has to stay transparent to let ``bg`` through. Without one: unchanged."""
+    if view.fg is None:
+        return render, gt
+    import torch
+
+    fg = torch.tensor(view.fg, dtype=torch.float32, device=gt.device)[None, ..., None]
+    return render + (1.0 - alpha) * bg, gt * fg + (1.0 - fg) * bg
+
+
 def _render(params, capture: Capture, viewmat, Ks, sh_degree: int):
     from gsplat import rasterization
     import torch
@@ -174,7 +185,8 @@ def _psnr(render, gt, mask) -> float:
 
 
 def evaluate(params, capture: Capture, views: list[View], sh_degree: int, device: str) -> float:
-    """Mean PSNR over ``views``, inside the loss mask. Returns nan for an empty list."""
+    """Mean PSNR over ``views``, inside the loss mask (object over black when segmented).
+    Returns nan for an empty list."""
     import torch
 
     if not views:
@@ -183,7 +195,9 @@ def evaluate(params, capture: Capture, views: list[View], sh_degree: int, device
         scores = []
         for view in views:
             viewmat, Ks, gt, mask = _batch(view, capture.K, device)
-            render, _, _ = _render(params, capture, viewmat, Ks, sh_degree)
+            render, alpha, _ = _render(params, capture, viewmat, Ks, sh_degree)
+            black = torch.zeros(3, device=device)
+            render, gt = _object_target(view, gt, render[..., :3], alpha, black)
             scores.append(_psnr(render.clamp(0, 1), gt, mask))
     return float(np.mean(scores))
 
@@ -250,8 +264,9 @@ def train(capture: Capture, cfg: TrainConfig | None = None, on_log=print) -> tup
         optimizers["means"].param_groups[0]["lr"] = means_lr
 
         viewmat, Ks, gt, mask = _batch(view, capture.K, device)
-        render, _, info = _render(params, capture, viewmat, Ks, sh_degree)
-        render = render[..., :3]
+        render, alpha, info = _render(params, capture, viewmat, Ks, sh_degree)
+        # A fresh random background each step: the only way to match it is real transparency.
+        render, gt = _object_target(view, gt, render[..., :3], alpha, torch.rand(3, device=device))
 
         # Both sides are masked, so pixels outside the object box contribute no gradient at all.
         pred, target = render * mask, gt * mask
