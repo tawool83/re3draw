@@ -93,6 +93,24 @@ python -m modal setup              # 브라우저가 열리면 구글 계정으�
   `mat` / `pose` / `synth` / `pytest`는 Mac에서 그대로 된다.
 - `opencv-contrib-python-headless`는 Apple Silicon용 휠이 있어 별도 빌드가 필요 없다.
 
+### Windows (PowerShell)
+
+`re3draw-worker` 명령은 가상환경 안에만 설치돼 있다. 가상환경을 켜지 않고 실행하면
+**"'re3draw-worker' 용어가 ... 인식되지 않습니다"** 오류가 난다.
+
+```powershell
+cd C:\repository\re3draw\packages\worker
+.\.venv\Scripts\Activate.ps1                 # 프롬프트 앞에 (.venv)가 붙으면 성공. 새 창마다 다시 실행
+re3draw-worker mat --board a3 -o ..\..\out\mat_a3.pdf
+python -m pytest
+python -m modal run modal_app.py::selftest
+```
+
+- 켜지 않고 쓰려면 경로를 붙인다: `.\.venv\Scripts\re3draw-worker.exe mat --board a3 -o ..\..\out\mat_a3.pdf`
+- `Activate.ps1`이 "스크립트를 실행할 수 없습니다"로 막히면 한 번만 실행:
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+- 처음 설치(가상환경이 없을 때)는 아래 Git Bash 절차와 같고, 경로만 `.venv\Scripts\`로 바꾼다.
+
 ### Windows (Git Bash)
 
 ```bash
