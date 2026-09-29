@@ -208,12 +208,12 @@ def train_remote(capture: str, out_name: str, args: list[str]) -> dict:
 
 @app.local_entrypoint()
 def main(capture: str, iters: int = 30000, gpu: str = DEFAULT_GPU, max_size: int = 1600,
-         board: str = "a3", upload: bool = True, segment: bool = True):
+         board: str = "a3", upload: bool = True, segment: bool = True, cap: int = 0):
     local = Path(capture).resolve()
     if not (local / "images").is_dir() or not (local / "sparse" / "0" / "images.txt").is_file():
         raise SystemExit(f"{local} needs images/ and sparse/0/ - run `re3draw-worker pose` first")
     name = local.name
-    out_name = f"splat-{iters}" if gpu == DEFAULT_GPU else f"splat-{iters}-{gpu.lower()}"
+    out_name = f"splat-{iters}" + (f"-cap{cap // 1000}k" if cap else "") + (f"-{gpu.lower()}" if gpu != DEFAULT_GPU else "")
 
     if upload:
         print(f"uploading {local} -> volume re3draw-captures:/{name}")
@@ -228,6 +228,8 @@ def main(capture: str, iters: int = 30000, gpu: str = DEFAULT_GPU, max_size: int
     seg_seconds = round(time.time() - t0, 1)
 
     args = ["--iters", str(iters), "--max-size", str(max_size), "--board", board]
+    if cap:
+        args += ["--cap", str(cap)]
     if not segment:
         args.append("--no-masks")
     t0 = time.time()

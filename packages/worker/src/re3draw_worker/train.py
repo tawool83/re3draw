@@ -29,7 +29,10 @@ if TYPE_CHECKING:  # pragma: no cover
 @dataclass
 class TrainConfig:
     iterations: int = 30_000
-    cap_max: int = 1_000_000  # ceiling on the gaussian population (MCMC keeps it fixed once reached)
+    # Ceiling on the gaussian population (MCMC keeps it fixed once reached). With object masks a
+    # 12 cm synthetic object used 48k / 84k / 179k gaussians under caps of 100k / 300k / 1M at equal
+    # PSNR (within 0.2 dB); 300k leaves headroom for textured real objects at a ~1.4 MB .spz.
+    cap_max: int = 300_000
     init_points: int = 100_000
     sh_degree: int = 3
     sh_degree_interval: int = 1_000  # raise the active SH degree this often

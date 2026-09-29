@@ -78,7 +78,7 @@ re3draw-worker train /workspace/capture1 -o /workspace/capture1/splat
 | --- | --- | --- |
 | `--iters` | 30000 | 반복 횟수. 물체는 7000으로도 쓸만하고 그만큼 빨라진다 |
 | `--max-size` | 1600 | 학습에 쓸 사진의 긴 변. 12MP 원본을 그대로 쓰면 느리고 이득이 적다 |
-| `--cap` | 1000000 | 가우시안 최대 개수. 줄이면 파일이 작아지고 빨라진다 |
+| `--cap` | 300000 | 가우시안 최대 개수. 줄이면 파일이 작아지고 빨라진다 (합성 12cm 물체: 10만/30만/100만 화질 동일) |
 | `--sh-degree` | 3 | 보는 각도에 따른 색 변화(반사광)의 표현력. 0이면 각도와 무관한 단색 |
 | `--object-width`, `--object-height` | 매트 기준 자동 | 물체를 가둘 상자 크기(미터). 물체가 작으면 줄이는 쪽이 품질에 좋다 |
 | `--val-every` | 8 | 8장에 1장은 학습에서 빼고 채점용으로 쓴다. 0이면 전부 학습에 쓴다 |
@@ -96,7 +96,7 @@ re3draw-worker train /workspace/capture1 -o /workspace/capture1/splat
 | --- | --- | --- |
 | 채점용 사진 화질 | **PSNR 25dB 이상**이면 양호, 20dB 미만이면 문제 | `psnr_val` |
 | 학습/채점 차이 | 두 값 차이가 3dB 이내 | `psnr_train` vs `psnr_val` |
-| 가우시안 수 | 20만~100만 | `gaussians_exported` |
+| 가우시안 수 | 5만~30만 (물체 오리기 사용 시) | `gaussians_exported` |
 | 시간 | 4090 기준 30000회에 10분 내외 | `seconds` |
 
 `psnr_val`이 `psnr_train`보다 많이 낮으면 사진이 부족하거나 각도가 치우친 것이다

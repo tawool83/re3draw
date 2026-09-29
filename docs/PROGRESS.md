@@ -49,17 +49,24 @@ python -m modal volume get --force re3draw-captures _diag/2000-512 ../../out/
    - 결과 (합성, 2,000회, 512px): 오리기 IoU 평균 0.989 / 최소 0.986,
      물체 PSNR 8.4dB(상자만) → **35.5dB**(학습) / **28.5dB**(채점). 사진 20장 오리기 약 20초
    - 가정: 물체가 매트 중앙을 덮고 있어야 함 (도넛처럼 가운데가 빈 물체는 실패 가능 → 품질 검사로 걸러 상자 기준 학습)
-2. **결과물 크기**: 작은 물체에 가우시안 100만 개는 과함 → `--cap` 기본값을 20만~30만으로 낮추는 안 검토
-3. `docker/Dockerfile`, `scripts/setup-gpu.sh`에 Modal에서 고친 설치 버그가 남아 있음
-   (gsplat 휠은 Python 3.10 전용, `--index-url` 대신 `--extra-index-url` 필요)
+2. ~~**결과물 크기**~~ ✅ (2026-09-29): `--cap` 기본값 100만 → **30만**. 합성 촬영본, 7,000회, 오리기 사용 시
+
+   | 상한 | 실제 가우시안 | PSNR 학습/채점 | 학습 시간 | `.spz` |
+   | --- | --- | --- | --- | --- |
+   | 10만 | 4.8만 | 36.7 / 28.9dB | 5.8분 | 0.8MB |
+   | 30만 | 8.4만 | 36.8 / 29.0dB | 7.1분 | 1.4MB |
+   | 100만 | 17.9만 | 36.7 / 29.1dB | 8.5분 | 2.9MB |
+
+   단색 원통이라 차이가 없음. 실물 촬영 후 재조정.
+3. ~~Dockerfile / setup-gpu.sh 설치 버그~~ ✅ (2026-09-29): Ubuntu 22.04(Python 3.10) 기반 +
+   `--extra-index-url` + `python3-dev`(spz 빌드) + pip 업그레이드. Modal에서 Dockerfile 그대로 빌드해 테스트 48개 통과
 
 ### 다음 할 일
 
 1. 실물 촬영으로 오리기 품질 확인 (합성은 단색 원통이라 쉬운 편)
-2. `--cap` 기본값 조정, 7,000회 / 30,000회 비교
-3. Dockerfile / setup-gpu.sh 설치 버그 수정
-4. `docs/m2-gpu-training.md`를 Modal 중심으로 개편
-5. 실물 촬영 검증 ([m2-real-capture-test.md](m2-real-capture-test.md))
+2. 7,000회 / 30,000회 비교 (실물 촬영본으로)
+3. `docs/m2-gpu-training.md`를 Modal 중심으로 개편
+4. 실물 촬영 검증 ([m2-real-capture-test.md](m2-real-capture-test.md))
 
 ### 나중에 할 일 (보류)
 

@@ -174,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--board", choices=boards, default="a3")
     p.add_argument("-o", "--output", required=True)
     p.add_argument("--iters", type=int, default=30000)
-    p.add_argument("--cap", type=int, default=1000000, help="maximum number of gaussians")
+    p.add_argument("--cap", type=int, default=300000, help="maximum number of gaussians")
     p.add_argument("--max-size", type=int, default=1600, help="longest image side used for training")
     p.add_argument("--sh-degree", type=int, default=3, choices=[0, 1, 2, 3])
     p.add_argument("--val-every", type=int, default=8, help="hold out every Nth photo (0 = train on all)")
