@@ -54,7 +54,8 @@ cd packages/worker
 - [ ] **1x 메인 렌즈만** 사용하고 줌은 하지 않는다.
 - [ ] iPhone: **매크로 자동 전환 끄기** (가까이 가면 초광각 렌즈로 바뀜)
 - [ ] **HDR, 인물 모드, 라이브 포토 끄기**
-- [ ] **폰 방향을 가로로 통일** (세로와 가로가 섞이면 섞인 쪽이 `image_size_mismatch`로 제외됨)
+- [ ] 폰 방향은 섞여도 된다 — `prepare`가 사진의 회전 정보를 무시하고 센서 방향 그대로 맞춘다
+  (단, 일부 앱처럼 픽셀 자체를 돌려 저장하면 `image_size_mismatch`로 제외될 수 있다. 가로 통일이 가장 안전)
 - [ ] iPhone: 사진 형식을 **"높은 호환성(JPEG)"**으로 설정 (현재 HEIC는 읽지 못함)
 - [ ] 가능하면 초점과 노출 고정 (AE/AF 잠금)
 
@@ -88,12 +89,19 @@ cd packages/worker
 
 ## 4. 실행
 
-사진은 `out/<촬영명>/images/`에 넣는다. `out/`은 `.gitignore`에 포함되어 커밋되지 않는다.
+폰에서 옮긴 사진을 **줄이거나 고치지 말고 그대로** `out/<촬영명>/raw/`에 넣는다.
+`out/`은 `.gitignore`에 포함되어 커밋되지 않는다.
 
 ```bash
 cd packages/worker
-.venv/Scripts/re3draw-worker pose ../../out/capture1/images --board a3 -o ../../out/capture1/sparse/0
+.venv/Scripts/re3draw-worker prepare ../../out/capture1/raw --board a3 -o ../../out/capture1
 ```
+
+`prepare`가 한 번에 하는 일:
+1. **사진 정규화** → `capture1/images/`: 긴 변 2048px로 축소(작은 사진은 그대로), JPEG 90으로 재압축,
+   **EXIF(GPS 위치 포함) 제거**, 회전 정보는 무시하고 센서 방향 그대로. 12MP 사진 45장(약 150MB)이 수십 MB가 된다.
+2. **카메라 위치 계산** → `capture1/sparse/0/`
+3. **방향 커버리지 검사**: 한쪽 면을 안 찍었으면 중단, 빈 칸이 있으면 경고
 
 결과물 (`out/capture1/sparse/0/`):
 
@@ -116,6 +124,8 @@ cd packages/worker
 | --- | --- | --- |
 | `too_few_views` | 매트가 검출된 사진이 8장 미만 | 매트가 더 많이 보이게 다시 촬영 |
 | `calibration_unstable` | 고도 30° 이상 사진이 3장 미만 | 중간·위 링 추가 촬영 |
+| `coverage_insufficient` | 한쪽 면(180° 넘는 방위)을 아예 안 찍음. 메시지에 빈 방향(예: back)이 나옴 | 그 방향을 찍는다. 일부러 한쪽만 원하면 `--allow-partial` |
+| (경고) `thin coverage` | 빈 돔 칸이 있거나 60° 넘게 빈 방위가 있음. `poses.json`의 `coverage.empty`에 칸 목록 | 목록의 칸(예: `low/back-left`)을 채워 찍는다 |
 | `marker_not_found` (사진별) | 해당 사진에서 매트 코너 8개 미만 | 소수면 정상, 많으면 거리나 물체 크기 조정 |
 | `image_size_mismatch` (사진별) | 다른 해상도나 방향의 사진 | 폰 방향과 렌즈 통일 |
 | `reprojection_error_*` (사진별) | 오차가 큰 사진 (흔들림, 매트 휨) | 흔들림 확인, 매트 평평하게 고정 |
@@ -148,8 +158,7 @@ cd packages/worker
 
 ## 알려진 제한 (M1 기준)
 
-- HEIC를 읽지 못함 → JPEG로 촬영하거나 변환
-- 세로와 가로 사진을 섞을 수 없음 → 폰 방향 통일
+- HEIC를 읽지 못함 → JPEG로 촬영하거나 변환 (`prepare`가 `heic_unsupported`로 알려 준다)
 - 렌즈와 줌을 섞을 수 없음 (카메라 모델을 하나만 추정) → 1x 고정
 - 결과를 눈으로 확인하는 도구가 아직 없음 → `re3draw-worker inspect` 추가 예정
   (사진마다 매트 좌표축 오버레이, 카메라 위치를 위에서 본 그림)

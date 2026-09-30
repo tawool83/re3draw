@@ -1,5 +1,7 @@
 """re3draw-worker command line.
 
+  re3draw-worker prepare RAW_PHOTOS -o CAPTURE_DIR  (ingest + pose: the usual first command)
+  re3draw-worker ingest  RAW_PHOTOS -o CAPTURE_DIR  (shrink, strip EXIF -> CAPTURE_DIR/images)
   re3draw-worker mat   --board a3 -o mat_a3.pdf
   re3draw-worker pose  PHOTOS_DIR --board a3 -o sparse/0
   re3draw-worker synth OUT_DIR --board a3        (synthetic ring capture + ground truth)
@@ -21,6 +23,7 @@ import numpy as np
 from .boards import BOARDS, get_board
 from .colmap import read_colmap, write_colmap
 from .coverage import assess
+from .ingest import MAX_LONG_SIDE, ingest
 from .mat import save_pdf
 from .pose import PoseError, estimate_poses
 
@@ -31,6 +34,23 @@ def _cmd_mat(args) -> int:
     path = save_pdf(get_board(args.board), args.output, dpi=args.dpi)
     print(f"wrote {path}  (print at 100% / actual size, then check the 100 mm scale bar)")
     return 0
+
+
+def _cmd_ingest(args) -> int:
+    report = ingest(args.photos, Path(args.output) / "images", max_long_side=args.max_side)
+    print(json.dumps({"ok": bool(report.written), "images": str(Path(args.output) / "images"), **report.to_json()}))
+    return 0 if report.written else 2
+
+
+def _cmd_prepare(args) -> int:
+    capture = Path(args.output)
+    report = ingest(args.photos, capture / "images", max_long_side=args.max_side)
+    print(json.dumps({"ingest": report.to_json()}), file=sys.stderr)
+    if not report.written:
+        print(json.dumps({"ok": False, "fail_code": "no_photos", "message": f"no readable photos in {args.photos}"}))
+        return 2
+    args.photos, args.output = str(capture / "images"), str(capture / "sparse" / "0")
+    return _cmd_pose(args)
 
 
 def _cmd_pose(args) -> int:
@@ -148,6 +168,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="re3draw-worker")
     sub = parser.add_subparsers(dest="cmd", required=True)
     boards = sorted(BOARDS)
+
+    p = sub.add_parser("prepare", help="photos off the phone -> normalised images/ + camera poses sparse/0/")
+    p.add_argument("photos", help="folder of photos as they came off the phone")
+    p.add_argument("--board", choices=boards, default="a3")
+    p.add_argument("-o", "--output", required=True, help="capture folder to create (images/, sparse/0/)")
+    p.add_argument("--max-side", type=int, default=MAX_LONG_SIDE, help="longest image side kept")
+    p.add_argument("--allow-partial", action="store_true",
+                   help="write the model even when a whole side was never photographed")
+    p.set_defaults(func=_cmd_prepare)
+
+    p = sub.add_parser("ingest", help="shrink photos and strip their metadata -> CAPTURE/images")
+    p.add_argument("photos")
+    p.add_argument("-o", "--output", required=True, help="capture folder (images/ is created in it)")
+    p.add_argument("--max-side", type=int, default=MAX_LONG_SIDE, help="longest image side kept")
+    p.set_defaults(func=_cmd_ingest)
 
     p = sub.add_parser("mat", help="write the printable marker mat PDF")
     p.add_argument("--board", choices=boards, default="a3")

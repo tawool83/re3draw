@@ -34,6 +34,7 @@ python -m venv .venv && .venv/Scripts/pip install -e ".[dev]"   # macOS/Linux: .
 re3draw-worker mat --board a3 -o mat_a3.pdf       # print at 100 %, check the 100 mm bar
 re3draw-worker synth out/synth                     # or photograph a real object on the mat
 re3draw-worker pose out/synth/images --board a3 -o out/synth/sparse/0
+# real photos: re3draw-worker prepare PHOTOS_OFF_THE_PHONE -o out/capture1  (shrinks, strips EXIF, poses)
 ```
 
 ## Try M2 (needs an NVIDIA GPU)

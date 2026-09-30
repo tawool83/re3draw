@@ -5,8 +5,9 @@ gaussian splat training.
 
 ```bash
 pip install -e ".[dev]"
-re3draw-worker mat   --board a3 -o mat_a3.pdf
-re3draw-worker pose  PHOTOS_DIR --board a3 -o sparse/0
+re3draw-worker mat     --board a3 -o mat_a3.pdf
+re3draw-worker prepare RAW_PHOTOS --board a3 -o CAPTURE_DIR   # ingest + pose, the usual first step
+re3draw-worker pose    PHOTOS_DIR --board a3 -o sparse/0      # pose alone, on already-normalised photos
 re3draw-worker synth OUT_DIR --board a3           # synthetic ring capture + ground_truth.json
 pytest
 ```
@@ -45,6 +46,15 @@ Failure codes (`fail_code`): `too_few_views` (fewer than 8 photos with the mat),
 `calibration_unstable` (fewer than 3 photos from ≥ 30° elevation — the low ring alone cannot
 separate lens principal point from camera tilt), `pnp_failed`.
 Per-photo rejections: `marker_not_found`, `image_size_mismatch`, `reprojection_error_*`.
+`coverage_insufficient`: a whole side (> 180 deg of azimuth) was never photographed; `--allow-partial`
+lets it through. Thinner gaps are warnings, listed in `poses.json` under `coverage`.
+
+## `prepare` / `ingest`
+
+Photos straight off a phone are 3-4 MB each and mostly thrown away downstream, so every capture is
+normalised first: long side <= 2048 px (never enlarged), JPEG 90, **no EXIF** (GPS included), and the
+EXIF rotation flag ignored so portrait and landscape shots share one camera model. HEIC is reported
+as `heic_unsupported`. The web/Flutter SDKs are to apply the same rules before upload.
 
 ## Accuracy (synthetic ring capture, 46 photos: 18 @ 15°, 18 @ 40°, 10 @ 70°)
 
