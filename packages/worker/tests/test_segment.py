@@ -14,7 +14,9 @@ from re3draw_worker.boards import get_board
 from re3draw_worker.colmap import read_colmap, write_colmap
 from re3draw_worker.dataset import default_object_box, load_capture
 from re3draw_worker.pose import estimate_poses
-from re3draw_worker.segment import REPORT, box_region, check_mask, iou, mask_path, seed_point, segment_capture
+from re3draw_worker.segment import (
+    REPORT, box_region, check_mask, choose_mask, drop_specks, iou, mask_path, seed_points, segment_capture,
+)
 from re3draw_worker.synthetic import ring_capture
 
 
@@ -32,11 +34,11 @@ def synthetic(tmp_path_factory):
     return spec, root, read_colmap(root / "sparse" / "0"), truth
 
 
-def test_seed_point_lands_on_the_object_from_every_ring(synthetic):
+def test_seed_points_land_on_the_object_from_every_ring(synthetic):
     _, _, model, truth = synthetic
     for entry in model.images:
-        x, y = np.round(seed_point(model, entry)).astype(int)
-        assert truth[entry.name][y, x], entry.name
+        for x, y in np.round(seed_points(model, entry)).astype(int):
+            assert truth[entry.name][y, x], entry.name
 
 
 def test_object_lies_inside_the_projected_box(synthetic):
@@ -55,18 +57,46 @@ def test_check_mask_rejects_nothing_and_the_table():
     assert check_mask(region.copy(), region) is None
 
 
+def test_choose_mask_prefers_the_whole_object_over_a_confident_part():
+    region = np.zeros((100, 100), bool)
+    region[20:80, 20:80] = True
+    part = np.zeros_like(region)
+    part[45:55, 45:55] = True  # a logo on the object: what SAM is most sure about
+    whole = np.zeros_like(region)
+    whole[30:70, 30:70] = True
+    table = np.ones_like(region)  # largest of all, but not the object
+    chosen = choose_mask(np.stack([part, whole, table]), np.array([0.95, 0.8, 0.6]), region)
+    assert (chosen == whole).all()
+
+
+def test_drop_specks_keeps_the_object_and_its_handle():
+    m = np.zeros((200, 200), bool)
+    m[50:150, 50:120] = True  # body
+    m[80:120, 130:140] = True  # a detached-looking handle, big enough to keep
+    m[5, 5] = m[190, 12] = True  # specks on the mat
+    out = drop_specks(m)
+    assert out[100, 100] and out[100, 135]
+    assert not out[5, 5] and not out[190, 12]
+
+
 class TruthSegmenter:
-    """Stands in for SAM 2 and returns the ground truth (or a bad mask for chosen photos).
-    Photos are told apart by their seed point, which is unique per camera pose."""
+    """Stands in for SAM 2: candidates are [a small part, the ground truth] (or an empty mask for
+    chosen photos). Photos are told apart by their seed points, which are unique per camera pose."""
 
     def __init__(self, model, truth, bad=()):
-        self.by_seed = {tuple(np.round(seed_point(model, e), 3)): (e.name, truth[e.name]) for e in model.images}
+        self.by_seed = {tuple(np.round(seed_points(model, e), 3).ravel()): (e.name, truth[e.name])
+                        for e in model.images}
         self.bad, self.calls = set(bad), []
 
-    def __call__(self, rgb, point):
-        name, mask = self.by_seed[tuple(np.round(point, 3))]
+    def __call__(self, rgb, points):
+        name, mask = self.by_seed[tuple(np.round(points, 3).ravel())]
         self.calls.append(name)
-        return np.zeros_like(mask) if name in self.bad else mask
+        if name in self.bad:
+            return np.zeros((1, *mask.shape), bool), np.array([0.9])
+        part = np.zeros_like(mask)
+        ys, xs = np.nonzero(mask)
+        part[ys[: len(ys) // 20], xs[: len(xs) // 20]] = True
+        return np.stack([part, mask]), np.array([0.99, 0.7])  # SAM most sure of the part
 
 
 def test_masks_survive_rectification_into_training_views(synthetic, tmp_path):

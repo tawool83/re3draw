@@ -5,16 +5,21 @@ training then paints that background into the box as a blurry curtain. An object
 training fit the object only and learn that everything else is transparent.
 
 SAM 2 needs a prompt, and the mat provides one for free: the capture guide puts the object on the
-centre of the mat, so the point 1 cm above the mat centre is inside the object, and its projection is
-on the object in every photo, whatever the angle. No user clicks.
+centre of the mat, so points 1 and 2 cm above the mat centre are inside the object, and their
+projections land on the object in every photo, whatever the angle. No user clicks.
 
-Measured on the synthetic capture (IoU with the true silhouette): that single point gives 0.97 on
-every ring. Prompting with the projected object box instead gave 0.00-0.23 - the box is far larger
-than the object, so SAM returns the mat - and adding detected mat corners as negative points made
-it worse, not better.
+SAM answers a point with three candidates - a part, a larger part, the whole thing - and the one it
+is most confident about is often a *part*: on the textured synthetic mug it returned the printed logo
+the point happened to land on (IoU with the true silhouette 0.38). We therefore take the **largest
+candidate that passes** :func:`check_mask`, i.e. the whole object but not the table. Measured on the
+mug benchmark (IoU, mean / worst photo): one point + most confident 0.38 / 0.06; one point + largest
+valid 0.92 / 0.51; two points (1, 2 cm) + largest valid 0.94 / 0.75. Earlier, on a plain cylinder,
+prompting with the projected object box gave 0.00-0.23 (SAM returns the mat) and mat corners as
+negative points made it worse. Points are kept low so objects down to ~3 cm tall still contain them.
 
 Masks are checked before they are kept: an empty mask, or one reaching well outside the object box,
-means SAM picked something else (the table, the mat) and that photo trains without a mask.
+means SAM picked something else (the table, the mat) and that photo trains without a mask. Specks
+far smaller than the object are dropped.
 
 Masks are written at the original photo resolution as ``masks/<photo name>.png`` (255 = object), so
 training at any resolution reuses them. SAM 2 wants torch >= 2.5 while gsplat's prebuilt wheels stop
@@ -33,9 +38,10 @@ from .colmap import ColmapModel, ModelImage
 from .dataset import ObjectBox
 
 DEFAULT_MODEL = "facebook/sam2.1-hiera-base-plus"
-SEED_HEIGHT_M = 0.01  # the prompt point: this far above the mat centre, i.e. inside the object
+SEED_HEIGHTS_M = (0.01, 0.02)  # prompt points above the mat centre, i.e. inside the object
 MIN_OBJECT_FRACTION = 0.0005  # of the photo; smaller means SAM found nothing
 MIN_INSIDE_BOX = 0.9  # share of the mask that must lie inside the projected object box
+MIN_COMPONENT = 0.02  # connected pieces smaller than this share of the mask are specks
 REPORT = "report.json"
 
 
@@ -50,9 +56,9 @@ def _project(model: ColmapModel, image: ModelImage, points: np.ndarray) -> np.nd
     return uv.reshape(-1, 2)
 
 
-def seed_point(model: ColmapModel, image: ModelImage) -> np.ndarray:
-    """The positive prompt: the mat centre, raised into the object, in original photo pixels."""
-    return _project(model, image, [[0.0, 0.0, SEED_HEIGHT_M]])[0]
+def seed_points(model: ColmapModel, image: ModelImage) -> np.ndarray:
+    """(N, 2) positive prompts: the mat centre raised into the object, in original photo pixels."""
+    return _project(model, image, [[0.0, 0.0, z] for z in SEED_HEIGHTS_M])
 
 
 def box_region(model: ColmapModel, image: ModelImage, box: ObjectBox) -> np.ndarray:
@@ -75,6 +81,24 @@ def check_mask(mask: np.ndarray, region: np.ndarray) -> str | None:
     return None
 
 
+def choose_mask(candidates: np.ndarray, scores: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """The largest candidate that passes :func:`check_mask`, else SAM's most confident one (which the
+    caller's check will then reject)."""
+    valid = [m for m in candidates if check_mask(m, region) is None]
+    if valid:
+        return max(valid, key=lambda m: int(m.sum()))
+    return candidates[int(np.argmax(scores))]
+
+
+def drop_specks(mask: np.ndarray) -> np.ndarray:
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    if n <= 2:
+        return mask
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    keep = np.nonzero(areas >= MIN_COMPONENT * areas.sum())[0] + 1
+    return np.isin(labels, keep)
+
+
 def iou(a: np.ndarray, b: np.ndarray) -> float:
     union = np.logical_or(a, b).sum()
     return float(np.logical_and(a, b).sum() / union) if union else 1.0
@@ -91,17 +115,16 @@ class Sam2Segmenter:
         self.processor = Sam2Processor.from_pretrained(model_id)
         self.model = Sam2Model.from_pretrained(model_id).to(self.device).eval()
 
-    def __call__(self, rgb: np.ndarray, point: np.ndarray) -> np.ndarray:
-        """Mask of the object under ``point``: SAM's three candidates, the one it scores highest."""
+    def __call__(self, rgb: np.ndarray, points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """SAM's candidates for the object under ``points``: ((K, H, W) bool masks, (K,) scores)."""
         import torch
 
-        inputs = self.processor(images=rgb, input_points=[[[[float(point[0]), float(point[1])]]]],
-                                input_labels=[[[1]]], return_tensors="pt").to(self.device)
+        inputs = self.processor(images=rgb, input_points=[[[[float(x), float(y)] for x, y in points]]],
+                                input_labels=[[[1] * len(points)]], return_tensors="pt").to(self.device)
         with torch.no_grad():
             out = self.model(**inputs, multimask_output=True)
         masks = self.processor.post_process_masks(out.pred_masks.cpu(), inputs["original_sizes"])[0]
-        masks = masks.reshape(-1, *rgb.shape[:2]).numpy().astype(bool)
-        return masks[int(out.iou_scores.cpu().numpy().ravel().argmax())]
+        return masks.reshape(-1, *rgb.shape[:2]).numpy().astype(bool), out.iou_scores.cpu().numpy().ravel()
 
 
 def segment_capture(
@@ -130,8 +153,12 @@ def segment_capture(
         if bgr is None:
             continue
         segmenter = segmenter or Sam2Segmenter()
-        mask = segmenter(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), seed_point(model, entry))
-        reason = check_mask(mask, box_region(model, entry, box))
+        region = box_region(model, entry, box)
+        candidates, scores = segmenter(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), seed_points(model, entry))
+        mask = drop_specks(choose_mask(candidates, scores, region))
+        reason = check_mask(mask, region)
+        report["kept"].pop(entry.name, None)
+        report["rejected"].pop(entry.name, None)
         if reason:
             report["rejected"][entry.name] = reason
             out.unlink(missing_ok=True)
