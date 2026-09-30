@@ -190,6 +190,141 @@ def diagnose(iters: int = 2000, max_size: int = 512) -> None:
     print(json.dumps(summary, indent=2))
 
 
+# The synthetic mug benchmark: the whole pipeline on a ray-traced mug with a handle, under three
+# capture habits. Scored on views no photo was taken from - including the back and the top.
+MUG_SCENARIOS = {
+    "full": {"rings": [[15.0, 18], [40.0, 18], [70.0, 10]], "azimuth": None},  # the capture guide
+    "front_only": {"rings": [[15.0, 9], [40.0, 9], [70.0, 5]], "azimuth": [-60.0, 60.0]},
+    "sparse": {"rings": [[15.0, 4], [40.0, 4], [70.0, 4]], "azimuth": None},
+}
+MUG_EVAL_VIEWS = [(0, 30), (90, 30), (180, 30), (270, 30), (45, 80)]  # (azimuth, elevation) deg
+MUG_EVAL_NAMES = ["front", "handle side", "back", "left", "top"]
+
+
+def _params_from_cloud(cloud, device: str):
+    import torch
+
+    t = lambda a: torch.tensor(a, dtype=torch.float32, device=device)  # noqa: E731
+    return {"means": t(cloud.means), "scales": t(cloud.scales), "quats": t(cloud.quats),
+            "opacities": t(cloud.opacities), "sh0": t(cloud.sh0), "shN": t(cloud.shN)}
+
+
+@app.function(gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=2 * 60 * 60, memory=16 * 1024)
+def mug_scenario(name: str, iters: int = 7000) -> dict:
+    import cv2
+    import numpy as np
+    import torch
+
+    from re3draw_worker import train as T
+    from re3draw_worker.boards import get_board
+    from re3draw_worker.colmap import read_colmap, write_colmap
+    from re3draw_worker.dataset import default_object_box, load_capture
+    from re3draw_worker.pose import PoseError, estimate_poses
+    from re3draw_worker.segment import iou, mask_path
+    from re3draw_worker.splat import write_ply, write_spz
+    from re3draw_worker.synthetic import Mug, Renderer, look_at, orbit_position, ring_capture
+
+    cfg_s = MUG_SCENARIOS[name]
+    spec, mug = get_board("a3"), Mug()
+    root = Path(VOLUME_ROOT, "_mug", name)
+    (root / "images").mkdir(parents=True, exist_ok=True)
+    report = {"scenario": name, **cfg_s}
+    t0 = time.time()
+    views, _, _ = ring_capture(spec, rings=[tuple(r) for r in cfg_s["rings"]], mug=mug,
+                               azimuth_deg=tuple(cfg_s["azimuth"]) if cfg_s["azimuth"] else None)
+    report["photos"], report["render_seconds"] = len(views), round(time.time() - t0, 1)
+    for v in views:
+        cv2.imwrite(str(root / "images" / v.name), v.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+
+    try:
+        res = estimate_poses(spec, [(v.name, v.image) for v in views])
+    except PoseError as e:  # the pipeline refusing is a result too
+        report["pose"] = {"ok": False, "fail_code": e.code, "message": str(e)}
+        (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        volume.commit()
+        return report
+    report["pose"] = {"ok": True, "posed": len(res.views), "rejected": res.rejected, "rms_px": round(res.rms_px, 3)}
+    write_colmap(res, root / "sparse" / "0")
+    volume.commit()
+
+    seg = segment_remote.remote(f"_mug/{name}", overwrite=True)
+    volume.reload()
+    truth = {v.name: v.object_mask for v in views}
+    ious = []
+    for v in res.views:
+        m = cv2.imread(str(mask_path(root / "masks", v.name)), 0)
+        ious.append(iou(m > 127 if m is not None else np.zeros_like(truth[v.name]), truth[v.name]))
+    report["segment"] = {"kept": seg["kept"], "rejected": seg["rejected"],
+                         "iou_mean": round(float(np.mean(ious)), 4), "iou_min": round(float(np.min(ious)), 4)}
+
+    box = default_object_box(spec)
+    cap = load_capture(read_colmap(root / "sparse" / "0"), root / "images", box, max_size=1600,
+                       masks_dir=root / "masks")
+    cloud, metrics = T.train(cap, T.TrainConfig(iterations=iters, log_every=0))
+    report["train"] = {k: metrics[k] for k in ("psnr_train", "psnr_val", "gaussians_exported", "seconds")}
+    out = root / f"splat-{iters}"
+    out.mkdir(parents=True, exist_ok=True)
+    ply = write_ply(cloud, out / "splat.ply")
+    try:
+        write_spz(ply, out / "splat.spz")
+    except Exception as e:  # noqa: BLE001 - the .ply is what the viewer reads anyway
+        report["spz_error"] = str(e)
+
+    # Unseen views: ground truth straight from the ray tracer (no lens, no noise) vs the splat.
+    w, h = 800, 600
+    K = np.array([[650.0, 0, w / 2], [0, 650.0, h / 2], [0, 0, 1]])
+    gt_render = Renderer(spec, K, np.zeros(4), (w, h))
+    params = _params_from_cloud(cloud, "cuda")
+    target = np.array([0.012, 0.0, 0.05])
+    rows_gt, rows_sp, per_view = [], [], {}
+    for (az, el), label in zip(MUG_EVAL_VIEWS, MUG_EVAL_NAMES):
+        R, t = look_at(orbit_position(np.radians(az), np.radians(el), 0.36), target)
+        bgr, mask = gt_render.render_mug(R, t, None, mug)
+        gt = bgr[..., ::-1].astype(np.float32) / 255.0 * mask[..., None]  # object over black
+        viewmat = torch.tensor(np.block([[R, t[:, None]], [np.zeros((1, 3)), np.ones((1, 1))]]),
+                               dtype=torch.float32, device="cuda")[None]
+        Ks = torch.tensor(K, dtype=torch.float32, device="cuda")[None]
+        with torch.no_grad():
+            from gsplat import rasterization
+            colors = torch.cat([params["sh0"], params["shN"]], dim=1)
+            r, a, _ = rasterization(params["means"], params["quats"], torch.exp(params["scales"]),
+                                    torch.sigmoid(params["opacities"]), colors, viewmat, Ks, w, h,
+                                    sh_degree=cloud.sh_degree, packed=False)
+        sp = r[0, ..., :3].clamp(0, 1).cpu().numpy()
+        alpha = a[0, ..., 0].cpu().numpy()
+        region = mask | (alpha > 0.05)
+        mse = float(((sp - gt) ** 2)[region].mean()) if region.any() else 0.0
+        per_view[label] = {"psnr": round(10 * np.log10(1.0 / max(mse, 1e-10)), 2),
+                           "silhouette_iou": round(iou(alpha > 0.5, mask), 3)}
+        rows_gt.append((gt * 255).astype(np.uint8)[..., ::-1])
+        rows_sp.append((sp * 255).astype(np.uint8)[..., ::-1])
+    sheet = np.vstack([np.hstack(rows_gt), np.hstack(rows_sp)])
+    for i, label in enumerate(MUG_EVAL_NAMES):
+        cv2.putText(sheet, label, (i * w + 12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+    cv2.putText(sheet, "truth", (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+    cv2.putText(sheet, f"re3draw ({name})", (12, 2 * h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+    cv2.imwrite(str(out / "unseen_views.png"), cv2.resize(sheet, (sheet.shape[1] // 2, sheet.shape[0] // 2)))
+    report["unseen_views"] = per_view
+    (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    volume.commit()
+    return report
+
+
+@app.function(volumes={VOLUME_ROOT: volume}, timeout=3 * 60 * 60)
+def mug_benchmark(iters: int = 7000) -> None:
+    """All scenarios in parallel; results in /_mug/<scenario>/ on the volume.
+
+        python -m modal run --detach modal_app.py::mug_benchmark
+    """
+    results = list(mug_scenario.starmap([(name, iters) for name in MUG_SCENARIOS]))
+    volume.reload()  # the scenarios wrote from other containers; see their files before adding ours
+    summary = Path(VOLUME_ROOT, "_mug", "summary.json")
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    volume.commit()
+    print(json.dumps(results, indent=2))
+
+
 @app.function(gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=2 * 60 * 60, memory=16 * 1024)
 def train_remote(capture: str, out_name: str, args: list[str]) -> dict:
     from re3draw_worker.cli import main
