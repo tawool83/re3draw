@@ -107,6 +107,68 @@ def write_ply(cloud: GaussianCloud, path: str | Path) -> Path:
     return path
 
 
+def read_ply(path: str | Path) -> GaussianCloud:
+    """Read a binary little-endian 3DGS `.ply` (ours, or another tool's) back into a cloud.
+
+    Properties are matched by name, so their order and any extra ones (e.g. normals) do not matter.
+    """
+    raw = Path(path).read_bytes()
+    end = raw.index(b"end_header") + len(b"end_header")
+    end += 2 if raw[end:end + 2] == b"\r\n" else 1
+    lines = raw[:end].decode("ascii").splitlines()
+    if "format binary_little_endian 1.0" not in lines:
+        raise ValueError(f"{path}: only binary little-endian PLY is supported")
+    count = next(int(line.split()[2]) for line in lines if line.startswith("element vertex"))
+    names, dtypes = [], []
+    for line in lines:
+        if line.startswith("property"):
+            _, kind, name = line.split()
+            names.append(name)
+            dtypes.append({"float": "<f4", "float32": "<f4", "double": "<f8", "uchar": "u1",
+                           "int": "<i4", "uint": "<u4"}[kind])
+    data = np.frombuffer(raw, dtype=np.dtype(list(zip(names, dtypes))), count=count, offset=end)
+    col = lambda *keys: np.stack([data[k].astype(np.float32) for k in keys], axis=1)  # noqa: E731
+    rest_names = sorted((n for n in names if n.startswith("f_rest_")), key=lambda n: int(n[7:]))
+    rest = col(*rest_names) if rest_names else np.zeros((count, 0), np.float32)
+    return GaussianCloud(
+        means=col("x", "y", "z"),
+        scales=col("scale_0", "scale_1", "scale_2"),
+        quats=col("rot_0", "rot_1", "rot_2", "rot_3"),
+        opacities=data["opacity"].astype(np.float32),
+        sh0=col("f_dc_0", "f_dc_1", "f_dc_2").reshape(count, 1, 3),
+        shN=np.transpose(rest.reshape(count, 3, -1), (0, 2, 1)),  # channel-major on disk
+    )
+
+
+def _quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    aw, ax, ay, az = np.moveaxis(a, -1, 0)
+    bw, bx, by, bz = np.moveaxis(b, -1, 0)
+    return np.stack([aw * bw - ax * bx - ay * by - az * bz, aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw], axis=-1)
+
+
+def rotmat_to_quat(R: np.ndarray) -> np.ndarray:
+    """Rotation matrix -> unit quaternion (w, x, y, z)."""
+    m = np.asarray(R, dtype=np.float64)
+    w = np.sqrt(max(0.0, 1.0 + m[0, 0] + m[1, 1] + m[2, 2])) / 2
+    x = np.copysign(np.sqrt(max(0.0, 1.0 + m[0, 0] - m[1, 1] - m[2, 2])) / 2, m[2, 1] - m[1, 2])
+    y = np.copysign(np.sqrt(max(0.0, 1.0 - m[0, 0] + m[1, 1] - m[2, 2])) / 2, m[0, 2] - m[2, 0])
+    z = np.copysign(np.sqrt(max(0.0, 1.0 - m[0, 0] - m[1, 1] + m[2, 2])) / 2, m[1, 0] - m[0, 1])
+    return np.array([w, x, y, z])
+
+
+def transformed(cloud: GaussianCloud, R: np.ndarray, scale: float, t: np.ndarray) -> GaussianCloud:
+    """The cloud moved by x -> scale * R @ x + t. Higher-order SH are not rotated, so this is exact
+    for degree-0 clouds (such as generated ones) and only approximate for view-dependent colour."""
+    q = rotmat_to_quat(R)
+    return GaussianCloud(
+        means=(scale * cloud.means @ np.asarray(R).T + np.asarray(t)).astype(np.float32),
+        scales=cloud.scales + np.float32(np.log(scale)),
+        quats=_quat_multiply(np.broadcast_to(q, cloud.quats.shape), cloud.quats),
+        opacities=cloud.opacities, sh0=cloud.sh0, shN=cloud.shN,
+    )
+
+
 class SpzUnavailable(RuntimeError):
     """The optional `spz` encoder is not installed."""
 

@@ -196,6 +196,10 @@ MUG_SCENARIOS = {
     "full": {"rings": [[15.0, 18], [40.0, 18], [70.0, 10]], "azimuth": None},  # the capture guide
     "front_only": {"rings": [[15.0, 9], [40.0, 9], [70.0, 5]], "azimuth": [-60.0, 60.0]},
     "sparse": {"rings": [[15.0, 4], [40.0, 4], [70.0, 4]], "azimuth": None},
+    # "Easy mode": front / right / back / left from 30 deg plus one from above. Too few photos to
+    # self-calibrate the lens, so it is given (an app would take it from the phone model / EXIF),
+    # and none is held out for scoring - the unseen views are the score.
+    "five": {"rings": [[30.0, 4], [75.0, 1]], "azimuth": None, "known_intrinsics": True, "val_every": 0},
 }
 MUG_EVAL_VIEWS = [(0, 30), (90, 30), (180, 30), (270, 30), (45, 80)]  # (azimuth, elevation) deg
 MUG_EVAL_NAMES = ["front", "handle side", "back", "left", "top"]
@@ -207,6 +211,54 @@ def _params_from_cloud(cloud, device: str):
     t = lambda a: torch.tensor(a, dtype=torch.float32, device=device)  # noqa: E731
     return {"means": t(cloud.means), "scales": t(cloud.scales), "quats": t(cloud.quats),
             "opacities": t(cloud.opacities), "sh0": t(cloud.sh0), "shN": t(cloud.shN)}
+
+
+def _score_unseen(cloud, title: str, png_path: Path) -> dict:
+    """Render ``cloud`` at the benchmark's unseen views and compare with the ray-traced truth (object
+    over black). Writes a truth-vs-splat sheet to ``png_path``; returns PSNR and silhouette IoU per view."""
+    import cv2
+    import numpy as np
+    import torch
+    from gsplat import rasterization
+
+    from re3draw_worker.boards import get_board
+    from re3draw_worker.segment import iou
+    from re3draw_worker.synthetic import Mug, Renderer, look_at, orbit_position
+
+    w, h = 800, 600
+    K = np.array([[650.0, 0, w / 2], [0, 650.0, h / 2], [0, 0, 1]])
+    gt_render, mug = Renderer(get_board("a3"), K, np.zeros(4), (w, h)), Mug()
+    params = _params_from_cloud(cloud, "cuda")
+    colors = torch.cat([params["sh0"], params["shN"]], dim=1)
+    target = np.array([0.012, 0.0, 0.05])
+    rows_gt, rows_sp, per_view = [], [], {}
+    for (az, el), label in zip(MUG_EVAL_VIEWS, MUG_EVAL_NAMES):
+        R, t = look_at(orbit_position(np.radians(az), np.radians(el), 0.36), target)
+        bgr, mask = gt_render.render_mug(R, t, None, mug)
+        gt = bgr[..., ::-1].astype(np.float32) / 255.0 * mask[..., None]
+        viewmat = torch.tensor(np.block([[R, t[:, None]], [np.zeros((1, 3)), np.ones((1, 1))]]),
+                               dtype=torch.float32, device="cuda")[None]
+        Ks = torch.tensor(K, dtype=torch.float32, device="cuda")[None]
+        with torch.no_grad():
+            r, a, _ = rasterization(params["means"], params["quats"], torch.exp(params["scales"]),
+                                    torch.sigmoid(params["opacities"]), colors, viewmat, Ks, w, h,
+                                    sh_degree=cloud.sh_degree, packed=False)
+        sp = r[0, ..., :3].clamp(0, 1).cpu().numpy()
+        alpha = a[0, ..., 0].cpu().numpy()
+        region = mask | (alpha > 0.05)
+        mse = float(((sp - gt) ** 2)[region].mean()) if region.any() else 0.0
+        per_view[label] = {"psnr": round(10 * np.log10(1.0 / max(mse, 1e-10)), 2),
+                           "silhouette_iou": round(iou(alpha > 0.5, mask), 3)}
+        rows_gt.append((gt * 255).astype(np.uint8)[..., ::-1])
+        rows_sp.append((sp * 255).astype(np.uint8)[..., ::-1])
+    sheet = np.vstack([np.hstack(rows_gt), np.hstack(rows_sp)])
+    for i, label in enumerate(MUG_EVAL_NAMES):
+        cv2.putText(sheet, label, (i * w + 12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+    cv2.putText(sheet, "truth", (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+    cv2.putText(sheet, title, (12, 2 * h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(png_path), cv2.resize(sheet, (sheet.shape[1] // 2, sheet.shape[0] // 2)))
+    return per_view
 
 
 @app.function(gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=2 * 60 * 60, memory=16 * 1024)
@@ -236,8 +288,15 @@ def mug_scenario(name: str, iters: int = 7000) -> dict:
     for v in views:
         cv2.imwrite(str(root / "images" / v.name), v.image, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
+    camera = None
+    if cfg_s.get("known_intrinsics"):
+        from re3draw_worker.pose import Camera
+        from re3draw_worker.synthetic import default_camera
+
+        K0, dist0 = default_camera(1600, 1200)
+        camera = Camera(1600, 1200, K0, dist0)
     try:
-        res = estimate_poses(spec, [(v.name, v.image) for v in views])
+        res = estimate_poses(spec, [(v.name, v.image) for v in views], camera=camera)
     except PoseError as e:  # the pipeline refusing is a result too
         report["pose"] = {"ok": False, "fail_code": e.code, "message": str(e)}
         (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -263,7 +322,7 @@ def mug_scenario(name: str, iters: int = 7000) -> dict:
     box = default_object_box(spec)
     cap = load_capture(read_colmap(root / "sparse" / "0"), root / "images", box, max_size=1600,
                        masks_dir=root / "masks")
-    cloud, metrics = T.train(cap, T.TrainConfig(iterations=iters, log_every=0))
+    cloud, metrics = T.train(cap, T.TrainConfig(iterations=iters, log_every=0, val_every=cfg_s.get("val_every", 8)))
     report["train"] = {k: metrics[k] for k in ("psnr_train", "psnr_val", "gaussians_exported", "seconds")}
     out = root / f"splat-{iters}"
     out.mkdir(parents=True, exist_ok=True)
@@ -273,41 +332,7 @@ def mug_scenario(name: str, iters: int = 7000) -> dict:
     except Exception as e:  # noqa: BLE001 - the .ply is what the viewer reads anyway
         report["spz_error"] = str(e)
 
-    # Unseen views: ground truth straight from the ray tracer (no lens, no noise) vs the splat.
-    w, h = 800, 600
-    K = np.array([[650.0, 0, w / 2], [0, 650.0, h / 2], [0, 0, 1]])
-    gt_render = Renderer(spec, K, np.zeros(4), (w, h))
-    params = _params_from_cloud(cloud, "cuda")
-    target = np.array([0.012, 0.0, 0.05])
-    rows_gt, rows_sp, per_view = [], [], {}
-    for (az, el), label in zip(MUG_EVAL_VIEWS, MUG_EVAL_NAMES):
-        R, t = look_at(orbit_position(np.radians(az), np.radians(el), 0.36), target)
-        bgr, mask = gt_render.render_mug(R, t, None, mug)
-        gt = bgr[..., ::-1].astype(np.float32) / 255.0 * mask[..., None]  # object over black
-        viewmat = torch.tensor(np.block([[R, t[:, None]], [np.zeros((1, 3)), np.ones((1, 1))]]),
-                               dtype=torch.float32, device="cuda")[None]
-        Ks = torch.tensor(K, dtype=torch.float32, device="cuda")[None]
-        with torch.no_grad():
-            from gsplat import rasterization
-            colors = torch.cat([params["sh0"], params["shN"]], dim=1)
-            r, a, _ = rasterization(params["means"], params["quats"], torch.exp(params["scales"]),
-                                    torch.sigmoid(params["opacities"]), colors, viewmat, Ks, w, h,
-                                    sh_degree=cloud.sh_degree, packed=False)
-        sp = r[0, ..., :3].clamp(0, 1).cpu().numpy()
-        alpha = a[0, ..., 0].cpu().numpy()
-        region = mask | (alpha > 0.05)
-        mse = float(((sp - gt) ** 2)[region].mean()) if region.any() else 0.0
-        per_view[label] = {"psnr": round(10 * np.log10(1.0 / max(mse, 1e-10)), 2),
-                           "silhouette_iou": round(iou(alpha > 0.5, mask), 3)}
-        rows_gt.append((gt * 255).astype(np.uint8)[..., ::-1])
-        rows_sp.append((sp * 255).astype(np.uint8)[..., ::-1])
-    sheet = np.vstack([np.hstack(rows_gt), np.hstack(rows_sp)])
-    for i, label in enumerate(MUG_EVAL_NAMES):
-        cv2.putText(sheet, label, (i * w + 12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-    cv2.putText(sheet, "truth", (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
-    cv2.putText(sheet, f"re3draw ({name})", (12, 2 * h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
-    cv2.imwrite(str(out / "unseen_views.png"), cv2.resize(sheet, (sheet.shape[1] // 2, sheet.shape[0] // 2)))
-    report["unseen_views"] = per_view
+    report["unseen_views"] = _score_unseen(cloud, f"re3draw ({name})", out / "unseen_views.png")
     (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     volume.commit()
     return report
@@ -326,6 +351,171 @@ def mug_benchmark(iters: int = 7000) -> None:
     summary.write_text(json.dumps(results, indent=2), encoding="utf-8")
     volume.commit()
     print(json.dumps(results, indent=2))
+
+
+# --- Easy mode, design 2: TRELLIS v1 (MIT) generates the whole object from the few photos. ---
+TRELLIS_MODEL = "microsoft/TRELLIS-image-large"
+# TRELLIS imports its mesh and renderer code at package import time. We only take gaussians, so
+# those dependencies are stubbed instead of installed: kaolin (Apache, but heavy) and, deliberately,
+# nvdiffrast, whose NVIDIA Source Code License is non-commercial. Calling into a stub raises.
+TRELLIS_STUBBED = ("kaolin", "nvdiffrast", "diffoctreerast", "diff_gaussian_rasterization")
+
+
+def _stub_trellis_optional_deps() -> None:
+    import importlib.abc
+    import importlib.machinery
+    import sys
+    import types
+
+    class _Missing:
+        def __init__(self, name):
+            self._name = name
+
+        def __getattr__(self, attr):
+            return _Missing(f"{self._name}.{attr}")
+
+        def __call__(self, *args, **kwargs):
+            raise ImportError(f"{self._name} is not installed in the re3draw TRELLIS image (gaussian output only)")
+
+        def __mro_entries__(self, bases):  # allow `class X(stub.Base)` at import time
+            return (object,)
+
+    class _Stub(types.ModuleType):
+        def __getattr__(self, attr):
+            if attr.startswith("__"):
+                raise AttributeError(attr)
+            return _Missing(f"{self.__name__}.{attr}")
+
+    class _Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split(".")[0] in TRELLIS_STUBBED:
+                return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
+            return None
+
+        def create_module(self, spec):
+            mod = _Stub(spec.name)
+            mod.__path__ = []
+            return mod
+
+        def exec_module(self, module):
+            pass
+
+    if not any(isinstance(f, _Finder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _Finder())
+
+
+def _download_trellis() -> None:
+    """Fetch weights only: building the pipeline needs a GPU, which image builds do not have."""
+    import torch
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(TRELLIS_MODEL)
+    torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14_reg", pretrained=True)  # Apache-2.0
+
+
+# Only the gaussian output is used, so the mesh / render extensions (kaolin, nvdiffrast,
+# diffoctreerast, mip-splatting) are left out. Background removal is bypassed: we pass RGBA photos
+# cut out by our SAM 2 masks.
+trellis_image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install("git", "build-essential", "libgl1", "libglib2.0-0", "libgomp1", "libegl1", "libxrender1",
+                 "libxext6", "libsm6", "libx11-6", "libusb-1.0-0")  # open3d, imported by TRELLIS
+    .pip_install("torch==2.4.1", "torchvision==0.19.1", index_url="https://download.pytorch.org/whl/cu124")
+    .pip_install("xformers==0.0.28.post1", index_url="https://download.pytorch.org/whl/cu124")
+    .pip_install("spconv-cu120", "pillow", "imageio", "imageio-ffmpeg", "tqdm", "easydict",
+                 "opencv-contrib-python-headless>=4.8", "scipy", "ninja", "rembg", "onnxruntime", "trimesh",
+                 "open3d", "xatlas", "pyvista", "pymeshfix", "igraph", "transformers", "huggingface_hub",
+                 "numpy<2")
+    .pip_install("git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8")
+    .run_commands("git clone --depth 1 --recurse-submodules https://github.com/microsoft/TRELLIS /opt/TRELLIS")
+    .env({"HF_HOME": "/models", "TORCH_HOME": "/models/torch", "ATTN_BACKEND": "xformers",
+          "SPCONV_ALGO": "native", "PYTHONPATH": "/opt/TRELLIS"})
+    .run_function(_download_trellis)
+    .add_local_python_source("re3draw_worker")
+)
+
+
+@app.function(image=trellis_image, gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=30 * 60)
+def trellis_generate(capture: str, seed: int = 1) -> dict:
+    """RGBA cut-outs of the capture's photos -> TRELLIS multi-image -> <capture>/trellis/raw.ply."""
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    _stub_trellis_optional_deps()
+    import xformers.ops.fmha as fmha
+    from xformers.ops.fmha.attn_bias import BlockDiagonalMask
+
+    fmha.BlockDiagonalMask = BlockDiagonalMask  # TRELLIS looks for it where older xformers exported it
+    from trellis.pipelines import TrellisImageTo3DPipeline
+
+    from re3draw_worker.colmap import read_colmap
+    from re3draw_worker.segment import mask_path
+
+    volume.reload()
+    root = Path(VOLUME_ROOT, capture)
+    model = read_colmap(root / "sparse" / "0")
+    images = []
+    for e in model.images:
+        m = cv2.imread(str(mask_path(root / "masks", e.name)), 0)
+        if m is None:
+            continue
+        rgb = cv2.cvtColor(cv2.imread(str(root / "images" / e.name)), cv2.COLOR_BGR2RGB)
+        images.append(Image.fromarray(np.dstack([rgb, m])))
+    t0 = time.time()
+    pipe = TrellisImageTo3DPipeline.from_pretrained(TRELLIS_MODEL)
+    pipe.cuda()
+    out = pipe.run_multi_image(images, seed=seed, formats=["gaussian"], mode="stochastic")
+    seconds = round(time.time() - t0, 1)
+    (root / "trellis").mkdir(parents=True, exist_ok=True)
+    out["gaussian"][0].save_ply(str(root / "trellis" / "raw.ply"))
+    volume.commit()
+    return {"images": len(images), "seconds": seconds}
+
+
+@app.function(gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=60 * 60)
+def trellis_place_and_score(capture: str, title: str) -> dict:
+    """Stand the generated asset on the mat by matching the photos' silhouettes, then score it."""
+    from re3draw_worker.align import Silhouette, apply, fit_to_silhouettes
+    from re3draw_worker.boards import get_board
+    from re3draw_worker.colmap import read_colmap
+    from re3draw_worker.dataset import default_object_box, load_capture
+    from re3draw_worker.splat import read_ply, write_ply
+
+    volume.reload()
+    root = Path(VOLUME_ROOT, capture)
+    raw = read_ply(root / "trellis" / "raw.ply")
+    cap = load_capture(read_colmap(root / "sparse" / "0"), root / "images", default_object_box(get_board("a3")),
+                       max_size=400, masks_dir=root / "masks")
+    views = [Silhouette(v.viewmat, cap.K, v.fg > 0.5) for v in cap.views if v.fg is not None]
+    t0 = time.time()
+    fit = fit_to_silhouettes(raw, views)
+    placed = apply(raw, fit)
+    write_ply(placed, root / "trellis" / "splat.ply")
+    report = {"gaussians": len(raw), "fit": {"up": fit.up, "yaw_deg": round(fit.yaw_deg, 1),
+                                             "size_cm": round(fit.size_m * 100, 2), "iou": round(fit.iou, 3),
+                                             "seconds": round(time.time() - t0, 1)},
+              "unseen_views": _score_unseen(placed, title, root / "trellis" / "unseen_views.png")}
+    (root / "trellis" / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    volume.commit()
+    return report
+
+
+@app.function(volumes={VOLUME_ROOT: volume}, timeout=3 * 60 * 60)
+def mug_ai_benchmark(iters: int = 7000) -> None:
+    """Easy mode on 5 photos: our pipeline alone (A) vs TRELLIS v1 placed on the mat (C).
+
+        python -m modal run --detach modal_app.py::mug_ai_benchmark
+    """
+    a = mug_scenario.remote("five", iters)
+    result = {"A_pipeline_5_photos": a}
+    if a.get("pose", {}).get("ok"):
+        result["C_trellis_generate"] = trellis_generate.remote("_mug/five")
+        result["C_trellis"] = trellis_place_and_score.remote("_mug/five", "TRELLIS v1 (5 photos)")
+    volume.reload()
+    Path(VOLUME_ROOT, "_mug", "ai_summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    volume.commit()
+    print(json.dumps(result, indent=2))
 
 
 @app.function(gpu=DEFAULT_GPU, volumes={VOLUME_ROOT: volume}, timeout=2 * 60 * 60, memory=16 * 1024)
