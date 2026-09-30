@@ -243,7 +243,10 @@ def mug_scenario(name: str, iters: int = 7000) -> dict:
         (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         volume.commit()
         return report
-    report["pose"] = {"ok": True, "posed": len(res.views), "rejected": res.rejected, "rms_px": round(res.rms_px, 3)}
+    from re3draw_worker.coverage import assess
+
+    report["pose"] = {"ok": True, "posed": len(res.views), "rejected": res.rejected, "rms_px": round(res.rms_px, 3),
+                      "coverage": assess([v.center for v in res.views]).to_json()}  # reported, not enforced here
     write_colmap(res, root / "sparse" / "0")
     volume.commit()
 

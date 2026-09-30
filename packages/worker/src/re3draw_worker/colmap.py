@@ -40,7 +40,8 @@ def rotmat_to_qvec(R: np.ndarray) -> np.ndarray:
     return q if q[0] >= 0 else -q
 
 
-def write_colmap(result: PoseResult, out_dir: str | Path, pose_source: str = "marker") -> Path:
+def write_colmap(result: PoseResult, out_dir: str | Path, pose_source: str = "marker", extra: dict | None = None) -> Path:
+    """Write the text model, plus ``poses.json`` (summary; ``extra`` keys are added to it)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     cam = result.camera
@@ -95,6 +96,7 @@ def write_colmap(result: PoseResult, out_dir: str | Path, pose_source: str = "ma
             for v in result.views
         ],
         "rejected": result.rejected,
+        **(extra or {}),
     }
     (out / "poses.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     return out

@@ -20,6 +20,7 @@ import numpy as np
 
 from .boards import BOARDS, get_board
 from .colmap import read_colmap, write_colmap
+from .coverage import assess
 from .mat import save_pdf
 from .pose import PoseError, estimate_poses
 
@@ -46,10 +47,18 @@ def _cmd_pose(args) -> int:
     except PoseError as e:
         print(json.dumps({"ok": False, "fail_code": e.code, "message": str(e)}))
         return 2
-    out = write_colmap(result, args.output)
+    coverage = assess([v.center for v in result.views])
+    if coverage.status == "fail" and not args.allow_partial:
+        print(json.dumps({"ok": False, "fail_code": "coverage_insufficient", "message": coverage.message(),
+                          "coverage": coverage.to_json()}))
+        return 2
+    if coverage.status != "ok":
+        print(f"warning: {coverage.message()}", file=sys.stderr)
+    out = write_colmap(result, args.output, extra={"coverage": coverage.to_json()})
     print(json.dumps({
         "ok": True, "output": str(out), "views": len(result.views), "rejected": result.rejected,
-        "rms_px": round(result.rms_px, 3), "seconds": round(time.perf_counter() - t0, 1),
+        "rms_px": round(result.rms_px, 3), "coverage": coverage.status,
+        "seconds": round(time.perf_counter() - t0, 1),
     }, ensure_ascii=False))
     return 0
 
@@ -150,6 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("photos")
     p.add_argument("--board", choices=boards, default="a3")
     p.add_argument("-o", "--output", required=True)
+    p.add_argument("--allow-partial", action="store_true",
+                   help="write the model even when a whole side was never photographed")
     p.set_defaults(func=_cmd_pose)
 
     p = sub.add_parser("synth", help="render a synthetic ring capture with ground truth")
